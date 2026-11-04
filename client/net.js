@@ -20,6 +20,7 @@ export class GameConnection {
   onAdd(field, fn) { return this.callbacks?.onAdd(field, fn); }
   onRemove(field, fn) { return this.callbacks?.onRemove(field, fn); }
   onMessage(type, fn) { return this.room?.onMessage(type, fn); }
+  onLeave(fn) { return this.room?.onLeave(fn); }
 
   send(type, data) { this.room?.send(type, data); }
 

@@ -70,7 +70,6 @@ export class SurvivalRoom extends Room {
     this.lastSupplyUse.set(client.sessionId, 0);
 
     this.broadcast('chat', { from: '☠ doom', text: `${name} joined the wasteland` });
-    client.send('joined', { mapId: this.mapId, name, px: player.x, py: player.y });
   }
 
   async onLeave(client) {

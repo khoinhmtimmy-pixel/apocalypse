@@ -4,7 +4,7 @@
 // from the same shared/maps.js the server simulates.
 import Phaser from 'phaser';
 import { generateMap, BIOMES } from '../shared/maps.js';
-import { buildTextures, paintStaticMap } from './tiles.js';
+import { buildTextures, paintStaticMap, addVignette } from './tiles.js';
 import { GameConnection } from './net.js';
 
 let conn = null; // module-scoped so scene restarts can leave cleanly
@@ -75,14 +75,22 @@ export class GameScene extends Phaser.Scene {
 
   create() {
     window.__gameScene = this;
+    document.getElementById('conn-error').style.display = 'none';
     this.map = generateMap(this.mapId);
     this.biome = this.map.biome;
     buildTextures(this, this.biome.palette);
     paintStaticMap(this, this.map);
 
-    this.players = new Map();   // sessionId -> { sprite, tag, data }
-    this.zombies = new Map();   // zombieId -> { sprite, data }
+    this.players = new Map();   // sessionId -> { sprite, shadow, tag, data }
+    this.zombies = new Map();   // zombieId -> { sprite, shadow, data }
     this.chatActive = false;
+    this.rejoining = false;
+
+    this.hearts = [];
+    for (let i = 0; i < 10; i++) {
+      this.hearts.push(this.add.image(22 + i * 14, 25, 'heart_empty')
+        .setScrollFactor(0).setDepth(101));
+    }
 
     // static world visuals
     for (const s of this.map.spawns) {
@@ -98,20 +106,31 @@ export class GameScene extends Phaser.Scene {
 
     this.cameras.main.setBounds(0, 0, this.map.px, this.map.py);
     this.cameras.main.setBackgroundColor('#101014');
+    addVignette(this);
 
-    // connection to the authoritative server
+    // connection to the authoritative server (auto-retry: restarts, refreshes,
+    // dead rooms — do not strand the player on the error screen)
     this.conn = conn || new GameConnection();
     conn = this.conn;
     this.status = this.add.text(this.scale.width / 2, this.scale.height / 2, 'connecting…', {
       fontFamily: 'monospace', fontSize: '18px', color: '#ccc',
     }).setOrigin(0.5).setScrollFactor(0).setDepth(101);
 
-    this.conn.join(this.mapId, localStorage.getItem('doomdays.name') || 'survivor')
+    this.joinWithRetry(this.mapId)
       .then(() => this.wireRoom())
       .catch((err) => {
-        console.error('Join failed', err);
+        console.error('Join failed after retries', err);
         document.getElementById('conn-error').style.display = 'flex';
       });
+
+    // dropped room (server restart, crash, network blip): quietly re-enter the
+    // world as a fresh survivor instead of freezing on a dead session
+    this.conn.onLeave((code) => {
+      if (this.rejoining) return;
+      pushChat({ from: '☠ doom', text: 'connection lost — finding you a new world…' });
+      this.rejoining = true;
+      this.time.delayedCall(800, () => this.scene.restart({ mapId: this.mapId }));
+    });
 
     // input
     this.keys = this.input.keyboard.addKeys({
@@ -138,6 +157,21 @@ export class GameScene extends Phaser.Scene {
     this.overlayTimer = 0;
   }
 
+  // retry a few times with backoff before surrendering to the error screen
+  async joinWithRetry(mapId) {
+    const delays = [1500, 3000, 5000];
+    const name = localStorage.getItem('doomdays.name') || 'survivor';
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this.conn.join(mapId, name);
+      } catch (err) {
+        if (attempt >= delays.length) throw err;
+        this.status.setText(`connecting… retry ${attempt + 1}`);
+        await new Promise((r) => setTimeout(r, delays[attempt]));
+      }
+    }
+  }
+
   wireRoom() {
     const c = this.conn;
     this.localSid = c.room.sessionId;
@@ -157,9 +191,10 @@ export class GameScene extends Phaser.Scene {
     c.onAdd('players', (player, sid) => {
       const isLocal = sid === this.localSid;
       const sprite = this.add.image(player.x, player.y, isLocal ? 'p_local' : 'p_other').setDepth(70);
+      const shadow = this.add.image(player.x, player.y, 'shadow').setDepth(67).setAlpha(0.5);
       if (!isLocal) sprite.setAlpha(0.92);
       const tag = makeNameTag(this, player.name);
-      this.players.set(sid, { sprite, tag, data: player });
+      this.players.set(sid, { sprite, shadow, tag, data: player });
       if (isLocal) {
         this.cameras.main.startFollow(sprite, true, 0.08, 0.08);
         pushChat({ from: '☠ doom', text: `You are ${player.name}. survive.` });
@@ -168,17 +203,18 @@ export class GameScene extends Phaser.Scene {
 
     c.onRemove('players', (_p, sid) => {
       const w = this.players.get(sid);
-      if (w) { w.sprite.destroy(); w.tag.destroy(); this.players.delete(sid); }
+      if (w) { w.sprite.destroy(); w.shadow?.destroy(); w.tag.destroy(); this.players.delete(sid); }
     });
 
     c.onAdd('zombies', (zombie, zid) => {
       const sprite = this.add.image(zombie.x, zombie.y, 'zombie').setDepth(69).setAlpha(0.92);
-      this.zombies.set(zid, { sprite, data: zombie });
+      const shadow = this.add.image(zombie.x, zombie.y, 'shadow').setDepth(66).setAlpha(0.45);
+      this.zombies.set(zid, { sprite, shadow, data: zombie });
     });
 
     c.onRemove('zombies', (_z, zid) => {
       const w = this.zombies.get(zid);
-      if (w) { w.sprite.destroy(); this.zombies.delete(zid); }
+      if (w) { w.sprite.destroy(); w.shadow?.destroy(); this.zombies.delete(zid); }
     });
   }
 
@@ -251,11 +287,14 @@ export class GameScene extends Phaser.Scene {
     const me = this.players.get(this.localSid)?.data;
     const hp = me ? me.hp : 100;
 
+    // minecraft-style panel: hearts + hazard meter
     const bar = this.hud.bar;
     bar.clear();
-    bar.fillStyle(0x000000, 0.55).fillRect(10, 10, 224, 72);
-    bar.fillStyle(0x2e4057, 1).fillRect(14, 14, 212, 10);
-    bar.fillStyle(0xc0392b, 1).fillRect(14, 14, 212 * hp / 100, 10);
+    panel(bar, 10, 10, 228, 46);
+    for (let i = 0; i < 10; i++) {
+      const v = hp - i * 10;
+      this.hearts[i].setTexture(v > 5 ? 'heart_full' : v > 0 ? 'heart_half' : 'heart_empty');
+    }
 
     let fraction = 0, color = 0x9ee05a, label = '';
     if (this.biome.flooded) {
@@ -269,12 +308,20 @@ export class GameScene extends Phaser.Scene {
       fraction = Math.min(1, world.wave / 20);
       label = `🧟 horde wave ${world.wave} — they keep coming`;
     }
-    bar.fillStyle(color, 1).fillRect(14, 28, 212 * fraction, 9);
+    bar.fillStyle(0x101010, 0.9).fillRect(14, 38, 220, 8);
+    bar.fillStyle(color, 1).fillRect(14, 38, 220 * fraction, 8);
     this.hud.biome.setText(label);
 
     this.hud.statusRight.setText(
       `${this.biome.name} · ${this.players.size} survivors · ${world.clock}s survived`);
   }
+}
+
+// beveled minecraft-style UI panel (light top-left, dark bottom-right edges)
+function panel(g, x, y, w, h) {
+  g.fillStyle(0x0f0f12, 0.72).fillRect(x, y, w, h);
+  g.fillStyle(0xffffff, 0.10).fillRect(x, y, w, 2).fillRect(x, y, 2, h);
+  g.fillStyle(0x000000, 0.45).fillRect(x, y + h - 2, w, 2).fillRect(x + w - 2, y, 2, h);
 }
 
 function lerpGroup(map, dt, factor) {
@@ -283,6 +330,7 @@ function lerpGroup(map, dt, factor) {
     if (!w.data) continue;
     w.sprite.x += (w.data.x - w.sprite.x) * t;
     w.sprite.y += (w.data.y - w.sprite.y) * t;
+    if (w.shadow) { w.shadow.x = w.sprite.x; w.shadow.y = w.sprite.y + 10; }
     if (w.tag) w.tag.setPosition(w.sprite.x, w.sprite.y - 12);
   }
 }
