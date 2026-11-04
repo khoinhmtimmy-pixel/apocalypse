@@ -1,0 +1,6 @@
+node_modules/
+public/dist/
+*.log
+screenshot*.png
+npm-install.log
+server.log

@@ -1,0 +1,28 @@
+{
+  "name": "apocalypse",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Doomdays — 2D top-down multiplayer survival game. Co-op survival across apocalypse biomes: Zombie City, Flooded World, Heat Wastes.",
+  "scripts": {
+    "build": "esbuild client/main.js --bundle --minify --outfile=public/dist/game.js",
+    "watch": "esbuild client/main.js --bundle --sourcemap --outfile=public/dist/game.js --watch",
+    "dev": "node server/index.js",
+    "start": "npm run build && node server/index.js",
+    "smoke": "node scripts/smoke.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@colyseus/schema": "^5.0.43",
+    "@colyseus/sdk": "^0.18.9",
+    "@colyseus/ws-transport": "^0.18.4",
+    "colyseus": "^0.18.10",
+    "express": "^4.21.2",
+    "phaser": "^4.2.1"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
+  }
+}

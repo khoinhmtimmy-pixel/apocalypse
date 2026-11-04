@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>☠ Doomdays — survive together</title>
+  <style>
+    html, body { margin: 0; padding: 0; background: #101014; overflow: hidden; }
+    #game { width: 100vw; height: 100vh; }
+    canvas { display: block; }
+
+    #chat-box {
+      display: none; position: fixed; left: 12px; bottom: 12px; z-index: 10;
+      width: 360px; flex-direction: column; gap: 4px;
+      font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px;
+    }
+    #chat-log {
+      display: flex; flex-direction: column; gap: 2px; padding: 4px 0;
+      pointer-events: none;
+    }
+    #chat-log div { color: #ddd; text-shadow: 1px 1px 0 #000; }
+    #chat-log b { color: #5ecfff; }
+    #chat-input {
+      background: rgba(10,10,14,0.85); color: #eee; border: 1px solid #44484f;
+      border-radius: 4px; padding: 6px 8px; outline: none; font: inherit;
+    }
+    #conn-error {
+      display: none; position: fixed; inset: 0; z-index: 20;
+      align-items: center; justify-content: center; background: rgba(10,10,14,0.9);
+      color: #ffb3a7; font-family: ui-monospace, monospace; font-size: 15px;
+      flex-direction: column; gap: 12px; text-align: center;
+    }
+    #conn-error button {
+      font: inherit; padding: 8px 18px; cursor: pointer;
+      background: #2b2f36; color: #eee; border: 1px solid #44484f; border-radius: 4px;
+    }
+  </style>
+</head>
+<body>
+  <div id="game"></div>
+
+  <div id="chat-box">
+    <div id="chat-log"></div>
+    <input id="chat-input" placeholder="say something… (esc to close)" maxlength="140" autocomplete="off" />
+  </div>
+
+  <div id="conn-error">
+    <div>Connection to the Doomdays server failed.<br />The wasteland is quiet… for now.</div>
+    <button onclick="location.reload()">Try again</button>
+  </div>
+
+  <script src="/dist/game.js"></script>
+</body>
+</html>
