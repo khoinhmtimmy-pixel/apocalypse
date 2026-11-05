@@ -4,6 +4,7 @@
 // The full static map is painted once into a canvas texture; actor/prop
 // sprites are generated at boot from the biome palette.
 import Phaser from 'phaser';
+import { BIOMES, TILE_SIZE, CHUNK_TILES, CHUNK_PX, genChunkData } from '../shared/maps.js';
 
 const P = 4; // 1 "minecraft block pixel" = 4px in a 32px tile => 8 blocks/tile
 const S = 32;
@@ -195,6 +196,17 @@ export function buildTextures(scene, palette) {
     ctx.fillStyle = '#2b2b30'; ctx.fillRect(13, 11, 2, 3);
   });
 
+  // campfire prop: stone ring, firewood, glowing embers (frost safe zone)
+  canvasTex(scene, 'campfire', 30, 26, (ctx) => {
+    ctx.fillStyle = '#00000066'; ctx.fillRect(3, 20, 24, 5);
+    ctx.fillStyle = '#5a4630'; ctx.fillRect(4, 12, 22, 8);
+    ctx.fillStyle = '#6d5638'; ctx.fillRect(5, 12, 20, 4);
+    ctx.fillStyle = '#4a3418'; ctx.fillRect(8, 6, 14, 10);
+    ctx.fillStyle = '#2f2210'; ctx.fillRect(10, 8, 10, 6);
+    ctx.fillStyle = '#ff8c3a'; ctx.fillRect(12, 6, 6, 8);
+    ctx.fillStyle = '#ffd166'; ctx.fillRect(13, 8, 4, 4);
+  });
+
   // spawn banner flag
   canvasTex(scene, 'spawnflag', 24, 28, (ctx) => {
     ctx.fillStyle = '#333333'; ctx.fillRect(11, 2, 2, 24);
@@ -234,46 +246,49 @@ export function buildTextures(scene, palette) {
   canvasTex(scene, 'heart_empty', 12, 11, heart(null, '#2b0f0c'));
 }
 
-// Paint the full static map once (ground, cobble walls, canopies, decor, paths)
-export function paintStaticMap(scene, map) {
-  const key = 'map_' + map.id;
-  if (scene.textures.exists(key)) scene.textures.remove(key);
+// Paint one endless-world chunk (32×32 tiles) into a canvas texture.
+// Same shared/rules painter as the old static map, applied per chunk as the
+// camera streams new chunks into view.
+export function buildChunkTexture(scene, mapId, cx, cy) {
+  const key = `chunk_${mapId}_${cx}_${cy}`;
+  if (scene.textures.exists(key)) return key;
 
+  const biome = BIOMES[mapId];
+  const chunk = genChunkData(mapId, cx, cy);
   const canvas = document.createElement('canvas');
-  canvas.width = map.px; canvas.height = map.py;
+  canvas.width = CHUNK_PX; canvas.height = CHUNK_PX;
   const ctx = canvas.getContext('2d');
-  const pal = map.biome.palette;
-  const T = map.tileSize;
-  const rng = mulberry32(hash('doomdays-art:' + map.id));
+  const pal = biome.palette;
+  const T = TILE_SIZE;
 
-  for (let ty = 0; ty < map.height; ty++) {
-    for (let tx = 0; tx < map.width; tx++) {
-      const i = ty * map.width + tx;
-      const ax = tx * T, ay = ty * T;
-      const r = mulberry32(hash(i + 7));
-      const nearCenter = Math.hypot(tx - 23.49, ty - 23.49) < 3.2;
+  for (let ly = 0; ly < CHUNK_TILES; ly++) {
+    for (let lx = 0; lx < CHUNK_TILES; lx++) {
+      const i = ly * CHUNK_TILES + lx;
+      const wx = cx * CHUNK_TILES + lx, wy = cy * CHUNK_TILES + ly;
+      const ax = wx * T, ay = wy * T;
+      const r = mulberry32(((wx * 73856093) ^ (wy * 19349663)) >>> 0);
+      const nearCenter = Math.hypot(wx + .5 - 23.5, wy + .5 - 23.5) < 3.2;
 
-      if (map.tiles[i] === 2) {           // building
+      if (chunk.tiles[i] === 2) {         // building
         paintWall(ctx, ax, ay, pal);
       } else if (nearCenter) {            // spawn plaza dirt path
         paintDirt(ctx, ax, ay, pal, r);
-      } else {
-        const groundLight = (tx * 7 + ty * 13) % 2 === 0;
+      } else {                            // ground + decor + canopies
+        const groundLight = ((wx * 7 + wy * 13) % 2) === 0;
         paintGround(ctx, ax, ay, pal, groundLight, r);
-        paintDecor(ctx, ax, ay, pal, i, map.biome.name);
-        if (map.tiles[i] === 3) {         // leaf canopy over the ground
+        paintDecor(ctx, ax, ay, pal, i, biome.name);
+        if (chunk.tiles[i] === 3) {       // leaf canopy over the ground
           paintLeaves(ctx, ax, ay, pal, r);
         }
       }
     }
   }
   scene.textures.addCanvas(key, canvas);
-  scene.add.image(0, 0, key).setOrigin(0).setDepth(-10);
   return key;
 }
 
 // Soft vignette over the viewport for mood
-export function addVignette(scene) {
+export function addVignette(scene, layer) {
   canvasTex(scene, 'vignette', 256, 256, (ctx, w, h) => {
     const g = ctx.createRadialGradient(w / 2, h / 2, w * 0.32, w / 2, h / 2, w * 0.52);
     g.addColorStop(0, 'rgba(0,0,0,0)');
@@ -284,6 +299,8 @@ export function addVignette(scene) {
   const vign = scene.add.image(w / 2, h / 2, 'vignette')
     .setScrollFactor(0).setDepth(98).setActive(true);
   vign.setDisplaySize(w + 4, h + 4);
+  if (layer) layer.add(vign);
+  return vign;
 }
 
 function shade2(hex, delta) {

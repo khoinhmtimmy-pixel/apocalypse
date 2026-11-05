@@ -1,5 +1,6 @@
-// scripts/smoke.js — headless verification: joins every biome, moves, checks
-// shared-room matchmaking (filterBy) and hazard scalars moving.
+// scripts/smoke.js — headless verification: joins every biome of the endless
+// world, moves, checks shared-room matchmaking (filterBy), hazard scalars,
+// hunger drain and the new disaster biomes.
 import { Client } from '@colyseus/sdk';
 
 const URL = process.env.SERVER_URL || 'http://localhost:2567';
@@ -13,11 +14,10 @@ function check(label, ok, extra = '') {
 async function join(name, mapId) {
   const client = new Client(URL);
   const room = await client.joinOrCreate('survival', { mapId, name });
-  const callbacks = Callbacks(room);
-  return { client, room, callbacks };
+  return { client, room };
 }
 
-// Local Callbacks.get shim so we don't need to import { Callbacks } twice.
+// Local Callbacks shim so we don't need to import { Callbacks } twice.
 function Callbacks(room) {
   return {
     players: room.state.players,
@@ -26,7 +26,8 @@ function Callbacks(room) {
 }
 
 async function run() {
-  const maps = ['zombie_city', 'flooded_world', 'heat_wastes'];
+  const maps = ['zombie_city', 'flooded_world', 'heat_wastes',
+    'frost_wastes', 'toxic_bog', 'meteor_fall'];
 
   // 1) each biome spawns a room, state syncs, hazards move, movement works
   for (const mapId of maps) {
@@ -41,15 +42,24 @@ async function run() {
       room.send('chat', { text: `smoke test on ${mapId}` });
       await wait(700);
 
-      const { x } = room.state.players.get(room.sessionId);
-      check('  player moved after input intent', x > 800, `x=${x}`);
+      const me = room.state.players.get(room.sessionId);
+      check('  player moved after input intent', me.x > 800, `x=${me.x}`);
       check('  world clock running', room.state.world.clock > 0, `clock=${room.state.world.clock}`);
+      check('  hunger drains over time', me.hunger < 100, `hunger=${me.hunger}`);
+      check('  loot/inventory fields sync', typeof me.food === 'number' && typeof me.med === 'number',
+        `food=${me.food} med=${me.med}`);
 
       if (mapId === 'flooded_world') {
         check('  water rising', room.state.world.waterLevel > 0, `water=${room.state.world.waterLevel}`);
       }
       if (mapId === 'heat_wastes') {
         check('  temperature tracked', room.state.world.temp > 0, `temp=${room.state.world.temp}`);
+      }
+      if (mapId === 'frost_wastes') {
+        check('  cold cycle tracked', typeof room.state.world.cold === 'number', `cold=${room.state.world.cold}`);
+      }
+      if (mapId === 'toxic_bog') {
+        check('  gas surge tracked', room.state.world.toxin > 0, `toxin=${room.state.world.toxin}`);
       }
       if (mapId === 'zombie_city') {
         await wait(13000); // first wave lands around 12s
@@ -70,7 +80,6 @@ async function run() {
     const b = await join('smokeB', 'zombie_city');
     check('same-map players share a room', a.room.roomId === b.room.roomId,
       `${a.room.roomId} vs ${b.room.roomId}`);
-    // both visible to each other's full state
     await wait(400);
     check('both players in shared state', a.room.state.players.size >= 2, `n=${a.room.state.players.size}`);
     a.room.leave(); b.room.leave();
@@ -94,3 +103,4 @@ async function run() {
 }
 
 run().catch((err) => { console.error(err); process.exit(1); });
+void Callbacks;

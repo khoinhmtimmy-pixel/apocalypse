@@ -1,76 +1,148 @@
-// shared/maps.js — the data-driven map layer of the engine.
-// One deterministic generator serves both the server (collision, hazards, spawns)
-// and the client (tile rendering). Same mapId on both sides => identical world.
-// Later, Tiled-authored JSON can replace/extend generateMap() without changing
-// either consumer's interface.
+// shared/maps.js — the data-driven map layer of the engine, now ENDLESS.
+// The world is no longer a fixed 48×48 grid: it is an infinite plane of 32×32
+// chunks, generated deterministically from (mapId, chunkX, chunkY). The server
+// simulates collision/hazards from chunk data and the client paints chunk
+// textures as they scroll into view — same chunk on both sides => same world.
+// Lattice value-noise makes terrain continuous across chunk borders (flooded
+// worlds get oceans/shorelines that drift forever as the water rises).
 
 // ---------------------------------------------------------------- biomes ---
 
 export const TILE = { GROUND: 0, WATER: 1, WALL: 2, SHADE: 3 };
+export const TILE_SIZE = 32;            // px per tile
+export const CHUNK_TILES = 32;          // tiles per chunk edge
+export const CHUNK_PX = CHUNK_TILES * TILE_SIZE;   // px per chunk edge
+
+// the one guaranteed safe start area, near world origin (inside chunk 0,0)
+export const PLAZA = { x: 23.5, y: 23.5 };
+export const SPAWNS = [
+  { tx: 23, ty: 23 }, { tx: 21, ty: 23 }, { tx: 25, ty: 23 },
+  { tx: 23, ty: 21 }, { tx: 23, ty: 25 }, { tx: 21, ty: 21 },
+  { tx: 25, ty: 25 }, { tx: 21, ty: 25 }, { tx: 25, ty: 21 },
+];
 
 export const BIOMES = {
   zombie_city: {
     id: 'zombie_city',
     name: 'Zombie City',
-    desc: 'A ruined city overrun by accumulating hordes. Hold the streets, loot supplies, stay alive.',
+    desc: 'An endless ruined city overrun by accumulating hordes. Loot supplies, band together, stay alive.',
     palette: {
       ground1: 0x494d52, ground2: 0x555a61, water: 0x1d4e5e,
       wall: 0x5e6067, wallTop: 0x767a82, shade: 0x2d5f3f, waterTint: 0x224455,
       fire: 0xff7a33, sky: 0x2a2c31, crack: true,
     },
-    flooded: false,
-    heat: false,
-    zombies: true,
+    flooded: false, heat: false, frost: false, toxic: false,
+    zombies: true, meteors: false, zoneKind: null,
     rules: {
-      waveInterval: 12000,     // ms between waves
-      zombiesPerWave: 2,       // grows every wave (+2)
+      waveInterval: 12000,
+      zombiesPerWave: 2,
       maxZombies: 40,
-      zombieSpeed: 54,         // px/s base, +3.5 per wave, capped 120
-      zombieDamage: 9,         // hp per hit
+      zombieSpeed: 54,
+      zombieDamage: 9,
       zombieAttackMs: 700,
-      zombieContact: 20,       // px hit distance
+      zombieContact: 20,
     },
   },
 
   flooded_world: {
     id: 'flooded_world',
     name: 'Flooded World',
-    desc: 'Rising sea levels swallow the island. High ground is life — the water never stops coming.',
+    desc: 'The water never stops rising. An endless oceanic world — climb forever toward high ground, loot as you go.',
     palette: {
       ground1: 0x62914a, ground2: 0x578341, water: 0x16505c,
       wall: 0x6e6e73, wallTop: 0x8a8a90, shade: 0x2c6140, waterTint: 0x246a80,
       fire: 0xff7a33, sky: 0x20272e, tuft: true, dirt: 0x7a5a34,
     },
-    flooded: true,
-    heat: false,
-    zombies: false,
+    flooded: true, heat: false, frost: false, toxic: false,
+    zombies: false, meteors: false, zoneKind: null,
     rules: {
       waterRate: 0.0050,       // waterLevel 0..1, reaches full in ~200s
-      submergedDps: 4,         // hp/s while standing in water
+      submergedDps: 4,
     },
   },
 
   heat_wastes: {
     id: 'heat_wastes',
     name: 'Heat Wastes',
-    desc: 'Climate breakdown: lethal heat waves on a scorched planet, wildfires spreading. Find shade.',
+    desc: 'Lethal heat waves under a scorched endless desert, wildfires spreading. Find shade, keep moving.',
     palette: {
       ground1: 0xd6bd7e, ground2: 0xc9b071, water: 0x2b6f7c,
       wall: 0x8a6c40, wallTop: 0xa5834e, shade: 0x2f6a45, waterTint: 0x2b6f7c,
       fire: 0xff7a33, sky: 0x3a2d20, dirt: 0x8f713e,
     },
-    flooded: false,
-    heat: true,
-    zombies: false,
+    flooded: false, heat: true, frost: false, toxic: false,
+    zombies: false, meteors: false, zoneKind: 'shade',
     rules: {
-      heatPeriodMs: 90000,     // temperature sine period
+      heatPeriodMs: 90000,
       heatMin: 26, heatMax: 55,
-      heatDamageTemp: 40,      // above this, heat starts hurting
-      heatDamageScale: 0.45,   // dps above threshold = (temp-40)*scale
-      shadeRadius: 90,         // px of shade zones
-      fireGrowth: 0.13,        // fire radius grows (tiles/s) from every seed
-      fireDps: 6,              // hp/s while burning
+      heatDamageTemp: 40,
+      heatDamageScale: 0.45,
+      zoneRadius: 90,
+      fireGrowth: 0.13,
+      fireDps: 6,
       maxFireRadiusTiles: 12,
+      fireSeedChance: 0.35,
+    },
+  },
+
+  frost_wastes: {
+    id: 'frost_wastes',
+    name: 'Frost Wastes',
+    desc: 'A frozen dark-ages world. The cold front sweeps in again and again — huddle at campfires or freeze.',
+    palette: {
+      ground1: 0xdde8f2, ground2: 0xcddcea, water: 0x27546b,
+      wall: 0x7c8692, wallTop: 0x99a3b0, shade: 0x3d6f8c,
+      fire: 0xff9a3a, sky: 0x27313d, stone: true,
+    },
+    flooded: false, heat: false, frost: true, toxic: false,
+    zombies: false, meteors: false, zoneKind: 'campfire',
+    rules: {
+      coldPeriodMs: 80000,
+      coldMin: -25, coldMax: 15,
+      freezeTemp: 0,           // below this °C the cold hurts
+      coldScale: 0.5,          // dps = (freezeTemp - cold) * scale
+      zoneRadius: 90,
+    },
+  },
+
+  toxic_bog: {
+    id: 'toxic_bog',
+    name: 'Toxic Bog',
+    desc: 'Fungal green gas surges over an endless swamp. When the surge comes, Shelter in a clean-air dome.',
+    palette: {
+      ground1: 0x4d6b3f, ground2: 0x44603a, water: 0x274d33,
+      wall: 0x54614d, wallTop: 0x6b7a63, shade: 0x6f944a, waterTint: 0x2b5b38,
+      fire: 0x74ff5a, sky: 0x1b2418, tuft: true, dirt: 0x5c4a2e,
+    },
+    flooded: false, heat: false, frost: false, toxic: true,
+    zombies: false, meteors: false, zoneKind: 'dome',
+    rules: {
+      toxinPeriodMs: 70000,    // gas surge pulse
+      toxinThreshold: 0.55,    // above this surge strength, toxin hurts
+      toxinDps: 5.5,
+      zoneRadius: 90,
+    },
+  },
+
+  meteor_fall: {
+    id: 'meteor_fall',
+    name: 'Meteor Fall',
+    desc: 'An endless burnt bombardment zone. Meteors land without warning — watch the sky, dodge the craters.',
+    palette: {
+      ground1: 0x8f6f52, ground2: 0x836449, water: 0x2b5f6b,
+      wall: 0x5f4a38, wallTop: 0x7a6047, shade: 0x356346,
+      fire: 0xff5a1f, sky: 0x2c1d16, crack: true, dirt: 0x4d3c2c,
+    },
+    flooded: false, heat: false, frost: false, toxic: false,
+    zombies: false, meteors: true, zoneKind: null,
+    rules: {
+      meteorIntervalMs: 16000, // between strikes (plus jitter)
+      meteorLeadMs: 2600,      // from warning to impact
+      meteorDamage: 34,
+      meteorRadius: 80,        // px blast radius
+      fireGrowth: 0.14,
+      fireDps: 6,
+      maxFireRadiusTiles: 9,
     },
   },
 };
@@ -95,173 +167,154 @@ function mulberry32(a) {
   };
 }
 
-// Smooth value noise with bilinear interpolation over a random lattice.
-function valueNoise(rng, width, height, freq) {
-  const gw = freq + 2, lat = new Float32Array(gw * (freq + 2));
-  for (let i = 0; i < lat.length; i++) lat[i] = rng();
-  const out = new Float32Array(width * height);
-  const step = width / freq;
-  for (let ty = 0; ty < height; ty++) {
-    for (let tx = 0; tx < width; tx++) {
-      const gx = tx / step, gy = ty / step;
-      const x0 = Math.min(freq, Math.floor(gx)), y0 = Math.min(freq, Math.floor(gy));
-      const fx = gx - x0, fy = gy - y0;
-      const v00 = lat[y0 * gw + x0], v10 = lat[y0 * gw + x0 + 1];
-      const v01 = lat[(y0 + 1) * gw + x0], v11 = lat[(y0 + 1) * gw + x0 + 1];
-      const sx = fx * fx * (3 - 2 * fx), sy = fy * fy * (3 - 2 * fy);
-      const top = v00 + (v10 - v00) * sx, bot = v01 + (v11 - v01) * sx;
-      out[ty * width + tx] = Math.max(0, Math.min(1, top + (bot - top) * sy));
-    }
-  }
-  return out;
+function clamp01(v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
+
+// Global lattice value-noise: node values come from (mapId, lattice coords),
+// so terrain is continuous and infinite, with no chunk seams.
+function nodeVal(mapId, nx, ny, ls) {
+  return mulberry32(hashString(`lat:${mapId}:${ls}:${nx}:${ny}`))();
 }
 
-// ------------------------------------------------------------- generator ---
+function noiseAt(mapId, tx, ty, ls) {
+  const gx = tx / ls, gy = ty / ls;
+  const x0 = Math.floor(gx), y0 = Math.floor(gy);
+  const fx = gx - x0, fy = gy - y0;
+  const v00 = nodeVal(mapId, x0, y0, ls), v10 = nodeVal(mapId, x0 + 1, y0, ls);
+  const v01 = nodeVal(mapId, x0, y0 + 1, ls), v11 = nodeVal(mapId, x0 + 1, y0 + 1, ls);
+  const sx = fx * fx * (3 - 2 * fx), sy = fy * fy * (3 - 2 * fy);
+  const a = v00 + (v10 - v00) * sx, b = v01 + (v11 - v01) * sx;
+  return clamp01(a + (b - a) * sy);
+}
 
-const cache = new Map();
-
-export function generateMap(mapId) {
-  if (cache.has(mapId)) return cache.get(mapId);
-  if (!BIOMES[mapId]) mapId = 'zombie_city';
+// Flooded worlds: 0..255 ground elevation at world tile (tx, ty).
+export function heightAt(mapId, tx, ty) {
   const biome = BIOMES[mapId];
+  if (!biome || !biome.flooded) return 255;
+  const v = 0.50 * noiseAt(mapId, tx, ty, 24)
+        + 0.34 * noiseAt(mapId, tx, ty, 6)
+        + 0.16 * noiseAt(mapId, tx, ty, 2.5);
+  const plateau = Math.max(0, 1 - Math.hypot(tx + .5 - PLAZA.x, ty + .5 - PLAZA.y) / 15) * 0.30;
+  return clamp01(v * 0.82 + plateau) * 255;
+}
 
-  const W = 48, H = 48, T = 32; // 1536x1536 px world
-  const rng = mulberry32(hashString('doomdays:' + mapId));
+function nearPlaza(wtx, wty, r) {
+  return Math.abs(wtx + .5 - PLAZA.x) < r && Math.abs(wty + .5 - PLAZA.ty) < r;
+}
 
-  const tiles = new Array(W * H).fill(TILE.GROUND);
-  const heights = new Array(W * H).fill(255);
+// ------------------------------------------------------------- chunks ------
 
-  // Height field: used by flooded_world (water coverage) and as a subtle
-  // variation hint everywhere. Center Spawn Plateau for flooded worlds.
-  if (biome.flooded) {
-    const n1 = valueNoise(rng, W, H, 6), n2 = valueNoise(rng, W, H, 12);
-    const cx = W / 2, cy = H / 2, R = Math.min(W, H) / 2;
-    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-      const i = y * W + x;
-      const edge = 1 - Math.hypot(x + .5 - cx, y + .5 - cy) / R; // island falloff
-      let v = 0.62 * n1[i] + 0.38 * n2[i];
-      v = v * Math.max(0, edge + 0.25);            // drown the rim
-      v += Math.max(0, 1 - Math.hypot(x + .5 - cx, y + .5 - cy) / (R * 0.45)) * 0.3; // plateau
-      heights[i] = Math.round(Math.max(0, Math.min(1, v)) * 255);
-    }
-  }
+const chunkCache = new Map();
 
-  // Buildings: solid wall blocks with a 1-tile gap between them. The center
-  // plaza (spawn area) stays clear.
-  const clearZone = (x, y) => Math.abs(x - 23) < 5 && Math.abs(y - 23) < 5;
-  const buildings = Math.round(W * H / 130); // ~17 buildings
-  for (let b = 0; b < buildings; b++) {
-    const bw = 2 + Math.floor(rng() * 5), bh = 2 + Math.floor(rng() * 5);
-    const bx = 1 + Math.floor(rng() * (W - bw - 2));
-    const by = 1 + Math.floor(rng() * (H - bh - 2));
-    if (Math.abs(bx - 23) < 6 && Math.abs(by - 23) < 6) continue; // keep plaza clear
-    // skip if it overlaps an existing wall region heading
+// One chunk of an endless world: 32×32 tiles + deterministic features.
+// lootSpots: crates to scavenge · nests: zombie spawn sites · safeZones:
+// shade canopies / campfires / clean-air domes · fireSeeds: wildfire origins.
+export function genChunkData(mapId, cx, cy) {
+  if (!BIOMES[mapId]) mapId = 'zombie_city';
+  const key = `${mapId}:${cx}:${cy}`;
+  let c = chunkCache.get(key);
+  if (c) return c;
+
+  const biome = BIOMES[mapId];
+  const rng = mulberry32(hashString('dd:' + key));
+  const tiles = new Array(CHUNK_TILES * CHUNK_TILES).fill(TILE.GROUND);
+  const wtx = (tx) => cx * CHUNK_TILES + tx;
+  const wty = (ty) => cy * CHUNK_TILES + ty;
+
+  // Buildings: 1–2 ruin blocks per chunk, never inside the spawn plaza.
+  const buildingCount = 1 + Math.floor(rng() * 2);
+  for (let b = 0; b < buildingCount; b++) {
+    const bw = 2 + Math.floor(rng() * 4), bh = 2 + Math.floor(rng() * 4);
+    const tx = 1 + Math.floor(rng() * (CHUNK_TILES - bw - 2));
+    const ty = 1 + Math.floor(rng() * (CHUNK_TILES - bh - 2));
+    let inPlaza = false;
+    for (let y = ty; y < ty + bh && !inPlaza; y++)
+      for (let x = tx; x < tx + bw && !inPlaza; x++)
+        if (nearPlaza(wtx(x), wty(y), 6)) inPlaza = true;
+    if (inPlaza) continue;
     let overlaps = false;
-    for (let y = by - 1; y <= by + bh; y++) for (let x = bx - 1; x <= bx + bw; x++)
-      if (tiles[y * W + x] === TILE.WALL) overlaps = true;
+    for (let y = ty - 1; y <= ty + bh; y++)
+      for (let x = tx - 1; x <= tx + bw; x++)
+        if (tiles[y * CHUNK_TILES + x] === TILE.WALL) overlaps = true;
     if (overlaps) continue;
-    for (let y = by; y < by + bh; y++) for (let x = bx; x < bx + bw; x++)
-      tiles[y * W + x] = TILE.WALL;
+    for (let y = ty; y < ty + bh; y++)
+      for (let x = tx; x < tx + bw; x++)
+        tiles[y * CHUNK_TILES + x] = TILE.WALL;
   }
 
-  // Shade canopies (heat biomes) scattered on ground tiles.
-  const shadeZones = [];
-  if (biome.heat) {
-    for (let k = 0; k < 6; k++) {
-      let tx = 0, ty = 0, tries = 0;
-      do {
-        tx = 1 + Math.floor(rng() * (W - 2)); ty = 1 + Math.floor(rng() * (H - 2)); tries++;
-      } while (tiles[ty * W + tx] !== TILE.GROUND && tries < 40);
-      if (tiles[ty * W + tx] === TILE.GROUND) {
-        tiles[ty * W + tx] = TILE.SHADE;
-        shadeZones.push({ tx, ty, r: biome.rules.shadeRadius / T });
+  // helper: a random ground tile in this chunk (world coords)
+  const freeSpot = (minPlazaDist = 0) => {
+    for (let n = 0; n < 40; n++) {
+      const tx = Math.floor(rng() * CHUNK_TILES), ty = Math.floor(rng() * CHUNK_TILES);
+      const i = ty * CHUNK_TILES + tx;
+      if (tiles[i] !== TILE.GROUND) continue;
+      if (minPlazaDist > 0) {
+        const d = Math.hypot(wtx(tx) + .5 - PLAZA.x, wty(ty) + .5 - PLAZA.y);
+        if (d < minPlazaDist) continue;
       }
+      return { wtx: wtx(tx), wty: wty(ty), local: i };
     }
-  }
-
-  // Points of interest ------------------------------------------------------
-  const freeTile = () => {
-    for (let n = 0; n < 200; n++) {
-      const tx = 1 + Math.floor(rng() * (W - 2)), ty = 1 + Math.floor(rng() * (H - 2));
-      const i = ty * W + tx;
-      if (tiles[i] === TILE.GROUND && !clearZone(tx, ty)) return { tx, ty };
-    }
-    return { tx: 23, ty: 18 };
+    return null;
   };
 
-  // Supply caches: on high ground for flooded worlds, anywhere dry otherwise.
-  const supplies = [];
-  for (let k = 0; k < 14; k++) {
-    if (biome.flooded) {
-      // rank some random candidates by height, take the best
-      let best = null;
-      for (let n = 0; n < 12; n++) {
-        const tx = 1 + Math.floor(rng() * (W - 2)), ty = 1 + Math.floor(rng() * (H - 2));
-        const i = ty * W + tx;
-        if (tiles[i] !== TILE.GROUND) continue;
-        if (!best || heights[i] > best.h) best = { tx, ty, h: heights[i] };
-      }
-      if (best) supplies.push({ tx: best.tx, ty: best.ty });
-    } else {
-      const p = freeTile();
-      supplies.push({ tx: p.tx, ty: p.ty });
+  const safeZones = [], lootSpots = [], fireSeeds = [], nests = [];
+
+  // Safe zones (biome-dependent props): shade canopy / campfire / air dome.
+  if (biome.zoneKind) {
+    const count = 1 + (rng() < 0.5 ? 1 : 0);
+    for (let k = 0; k < count; k++) {
+      const p = freeSpot(9);
+      if (!p) continue;
+      safeZones.push({ x: p.wtx, y: p.wty, r: biome.rules.zoneRadius / TILE_SIZE, kind: biome.zoneKind });
+      if (biome.zoneKind === 'shade') tiles[p.local] = TILE.SHADE;
     }
   }
 
-  // Zombie nest sites (zombie biomes): spread to the four quadrants + edges.
-  const nests = [];
-  if (biome.zombies) {
-    const quads = [[4, 4], [W - 5, 4], [4, H - 5], [W - 5, H - 5], [W / 2 | 0, 3], [W / 2 | 0, H - 4]];
-    for (const [qx, qy] of quads) nests.push({ tx: qx, ty: qy });
+  // Wildfire seed (heat biome).
+  if (biome.heat && rng() < biome.rules.fireSeedChance) {
+    const p = freeSpot(12);
+    if (p) fireSeeds.push({ wtx: p.wtx, wty: p.wty });
   }
 
-  // Wildfire seeds (heat biome): away from spawn center.
-  const fires = [];
-  if (biome.heat) {
-    for (let k = 0; k < 4; k++) {
-      let tx, ty, ok = false;
-      for (let n = 0; n < 60 && !ok; n++) {
-        tx = 2 + Math.floor(rng() * (W - 4)); ty = 2 + Math.floor(rng() * (H - 4));
-        ok = Math.hypot(tx - 23, ty - 23) > 14 && tiles[ty * W + tx] === TILE.GROUND;
-      }
-      if (ok) fires.push({ tx, ty });
-    }
+  // Loot crates: 3 per chunk, contents decided once and forever.
+  for (let k = 0; k < 3; k++) {
+    const p = freeSpot(4);
+    if (p) lootSpots.push({ wtx: p.wtx, wty: p.wty, kind: rng() < 0.62 ? 'food' : 'med' });
   }
 
-  // Spawn points: free tiles around the central plaza.
-  const spawns = [
-    { tx: 23, ty: 23 }, { tx: 21, ty: 23 }, { tx: 25, ty: 23 },
-    { tx: 23, ty: 21 }, { tx: 23, ty: 25 }, { tx: 21, ty: 21 },
-    { tx: 25, ty: 25 }, { tx: 21, ty: 25 }, { tx: 25, ty: 21 },
-  ];
+  // Zombie nest site (zombie biomes), away from the plaza.
+  if (biome.zombies && rng() < 0.45) {
+    const p = freeSpot(13);
+    if (p) nests.push({ wtx: p.wtx, wty: p.wty });
+  }
 
-  const map = {
-    id: mapId, name: biome.name, width: W, height: H, tileSize: T,
-    px: W * T, py: H * T,
-    tiles, heights, spawns, supplies, nests, fires, shadeZones,
-    biome,
-  };
-
-  cache.set(mapId, map);
-  return map;
+  c = { key, mapId, tiles, safeZones, lootSpots, fireSeeds, nests };
+  if (chunkCache.size > 400) chunkCache.delete(chunkCache.keys().next().value);
+  chunkCache.set(key, c);
+  return c;
 }
 
-// ------------------------------------------------- server helpers (pure) ---
-
-// Is this pixel blocked for a character given current water level?
-export function isBlockedMap(map, px, py, waterLevel) {
-  if (px < 0 || py < 0 || px >= map.px || py >= map.py) return true;
-  const T = map.tileSize;
-  const tx = Math.floor(px / T), ty = Math.floor(py / T);
-  const i = ty * map.width + tx;
-  if (map.tiles[i] === TILE.WALL) return true;
-  if (map.biome.flooded && map.heights[i] < waterLevel * 255) return true;
-  return false;
+// Chunk-space helpers (handle negative world coords cleanly).
+export function chunkOf(px, py) {
+  return { cx: Math.floor(px / CHUNK_PX), cy: Math.floor(py / CHUNK_PX) };
+}
+export function tileOf(px, py) {
+  return { tx: Math.floor(px / TILE_SIZE), ty: Math.floor(py / TILE_SIZE) };
 }
 
-export function tileIndexAt(map, px, py) {
-  const T = map.tileSize;
-  const tx = Math.min(map.width - 1, Math.max(0, Math.floor(px / T)));
-  const ty = Math.min(map.height - 1, Math.max(0, Math.floor(py / T)));
-  return ty * map.width + tx;
+// Server + client collision helpers -----------------------------------------
+
+export function isWallAt(mapId, px, py) {
+  const { cx, cy } = chunkOf(px, py);
+  const chunk = genChunkData(mapId, cx, cy);
+  const { tx, ty } = tileOf(px, py);
+  const lx = tx - cx * CHUNK_TILES, ly = ty - cy * CHUNK_TILES;
+  return chunk.tiles[ly * CHUNK_TILES + lx] === TILE.WALL;
+}
+
+// Blocked pixel check. Flooded worlds submerge tiles as waterLevel rises.
+export function isBlockedAt(mapId, px, py, waterLevel) {
+  const { tx, ty } = tileOf(px, py);
+  if (heightAt(mapId, tx, ty) < waterLevel * 255) return true; // water everywhere else
+  if (BIOMES[mapId] && BIOMES[mapId].flooded) return false;
+  return isWallAt(mapId, px, py);
 }
