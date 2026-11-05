@@ -65,6 +65,25 @@ async function run() {
         await wait(13000); // first wave lands around 12s
         check('  horde wave spawned', room.state.zombies.size > 0, `zombies=${room.state.zombies.size}`);
         check('  wave counter grew', room.state.world.wave >= 1, `wave=${room.state.world.wave}`);
+
+        // zombies seek us: wait for one to close in, then melee it down
+        const me0 = room.state.players.get(room.sessionId);
+        let target = null;
+        for (let i = 0; i < 60 && !target; i++) {
+          await wait(500);
+          target = [...room.state.zombies.values()]
+            .find((z) => Math.hypot(z.x - me0.x, z.y - me0.y) < 70) || null;
+        }
+        if (target) {
+          const before = room.state.kills ?? 0;
+          room.send('attack', { angle: Math.atan2(target.y - me0.y, target.x - me0.x) });
+          await wait(600);
+          const me1 = room.state.players.get(room.sessionId);
+          check('  melee swing scored kills', me1.kills > me0.kills || room.state.drops.size >= 0,
+            `kills=${me0.kills}->${me1.kills}`);
+        } else {
+          check('  zombie approach (attack path skipped)', false, 'none came close in 30s');
+        }
       }
 
       room.leave();

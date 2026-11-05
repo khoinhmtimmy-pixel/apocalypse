@@ -3,7 +3,7 @@
 // chunk data, per-biome hazards (hordes, rising water, heat, frost, gas,
 // meteors), hunger/starvation, loot scavenging and wildfires.
 import { Room } from 'colyseus';
-import { Player, Zombie, Fire, SurvivalState } from './state.js';
+import { Player, Zombie, Fire, Drop, SurvivalState } from './state.js';
 import {
   BIOMES, TILE_SIZE, CHUNK_TILES, SPAWNS,
   genChunkData, tileOf, isBlockedAt, isWallAt, heightAt,
@@ -21,6 +21,20 @@ const FOOD_CAP = 9, MED_CAP = 5;
 const LOOT_PICKUP_MS = 1200;    // cooldown between scavenges
 const LOOT_RADIUS = 30;         // px
 const FIRE_CAP = 60;
+
+// melee attack — [Space] / left-click swings
+const ATTACK_CD_MS = 450;       // swing cooldown per player
+const TAU = Math.PI * 2;
+const ATTACK_RANGE = 64;        // px reach from the attacker's center
+const ATTACK_HALF_ARC = 75 * Math.PI / 180;  // cone width is centered on the aim
+const ATTACK_DAMAGE = 40;       // one base zombie per swing
+const ATTACK_KNOCKBACK = 16;    // px the survivor knocks the zombie back
+const DROP_MED_CHANCE = 0.25;   // killed zombie drop rates
+const DROP_FOOD_CHANCE = 0.45;
+
+// endless-map hygiene: idle far zombies stop chasing forever
+const ZOMBIE_LEASH_PX = 940;    // farther than this from every survivor...
+const ZOMBIE_LEASH_MS = 6000;   // ...for this long, and the zombie fades out
 
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 
@@ -47,6 +61,10 @@ export class SurvivalRoom extends Room {
     this.looted = new Set();          // chunk loot spot keys already scavenged
     this.firesSeeded = new Set();     // chunk keys whose fire seeds were released
     this.pendingMeteors = [];         // {x, y, at}
+    this.lastAttack = new Map();      // sessionId -> ms timestamp of last swing
+    this.zombieFarSince = new Map();  // zombieId -> ms since out of everyone's reach
+    this.dropsSeq = 0;
+    this.waterCapAnnounced = false;
     this.meteorTimer = this.rules.meteorIntervalMs
       ? this.rules.meteorIntervalMs / 2 : 0;
     this.zombieSeq = 0;
@@ -87,6 +105,7 @@ export class SurvivalRoom extends Room {
     this.hungerFloat.set(client.sessionId, HUNGER_MAX);
     this.lastZombieHit.set(client.sessionId, 0);
     this.lastLootPickup.set(client.sessionId, 0);
+    this.lastAttack.set(client.sessionId, 0);
 
     // late joiners need to know what was already scavenged
     client.send('looted', { keys: [...this.looted] });
@@ -106,6 +125,7 @@ export class SurvivalRoom extends Room {
     this.hungerFloat.delete(client.sessionId);
     this.lastZombieHit.delete(client.sessionId);
     this.lastLootPickup.delete(client.sessionId);
+    this.lastAttack.delete(client.sessionId);
   }
 
   // ------------------------------------------------------------ messages  ---
@@ -145,6 +165,34 @@ export class SurvivalRoom extends Room {
       this.healPlayer(client.sessionId, MED_HEAL);
       this.broadcast('system', { event: 'healed', name: player.name });
     },
+
+    // [Space] / left-click: server-authoritative melee swing toward the aim angle
+    'attack': (client, data) => {
+      const sessionId = client.sessionId;
+      const player = this.state.players.get(sessionId);
+      if (!player) return;
+      const now = Date.now();
+      if (now - (this.lastAttack.get(sessionId) || 0) < ATTACK_CD_MS) return;
+      this.lastAttack.set(sessionId, now);
+
+      let aim = Number(data?.angle);
+      if (!Number.isFinite(aim)) aim = (player.angle / 255) * TAU; // fall back to facing
+      aim = ((aim % TAU) + TAU) % TAU;
+
+      this.broadcast('system', {
+        event: 'swing', sid: sessionId,
+        angle: Math.round(aim * 255 / TAU), x: player.x, y: player.y,
+      });
+
+      for (const [zid, zombie] of this.state.zombies) {
+        const dx = zombie.x - player.x, dy = zombie.y - player.y;
+        if (Math.hypot(dx, dy) > ATTACK_RANGE) continue;
+        let diff = Math.abs(Math.atan2(dy, dx) - aim);
+        diff = Math.min(diff, TAU - diff);
+        if (diff > ATTACK_HALF_ARC) continue;
+        this.hitZombie(zid, zombie, player);
+      }
+    },
   };
 
   // ------------------------------------------------------------ simulation --
@@ -157,8 +205,13 @@ export class SurvivalRoom extends Room {
 
     // --- environmental scalars (one authoritative value per hazard) ---
     if (this.biome.flooded) {
-      this.waterLevel = Math.min(1, this.waterLevel + rules.waterRate * dt);
+      this.waterLevel = Math.min(rules.waterCap ?? 0.90, this.waterLevel + rules.waterRate * dt);
       this.state.world.waterLevel = Math.round(this.waterLevel * 1000) / 1000;
+      if (!this.waterCapAnnounced && this.waterLevel >= (rules.waterCap ?? 0.90)) {
+        this.waterCapAnnounced = true;
+        this.broadcast('chat', { from: '☠ doom',
+          text: 'The flood has reached its peak. The highland islands stay dry — hop them forever.' });
+      }
     }
     if (this.biome.heat) {
       this.state.world.temp = Math.round(
@@ -219,6 +272,9 @@ export class SurvivalRoom extends Room {
     for (const [sessionId, player] of this.state.players) {
       const input = this.inputs.get(sessionId) || { dx: 0, dy: 0 };
       this.moveCharacter(player, input.dx, input.dy, PLAYER_SPEED, dt);
+      if (input.dx || input.dy) {
+        player.angle = clamp(Math.round(((Math.atan2(input.dy, input.dx) / TAU) * 255) % 256), 0, 255);
+      }
 
       // hunger drains no matter what; an empty belly burns health
       const hung = Math.max(0, (this.hungerFloat.get(sessionId) ?? HUNGER_MAX) - HUNGER_DRAIN * dt);
@@ -271,14 +327,27 @@ export class SurvivalRoom extends Room {
       }
     }
 
-    // --- zombies: target nearest player, chase, bite ---
-    for (const zombie of this.state.zombies.values()) {
+    // --- zombies: target nearest player, chase, bite; fade out far strays ---
+    for (const [zid, zombie] of this.state.zombies) {
       let best = null, bestSid = null, bestD = 1e9;
       for (const [sid, player] of this.state.players) {
         const d = Math.hypot(player.x - zombie.x, player.y - zombie.y);
         if (d < bestD) { bestD = d; best = player; bestSid = sid; }
       }
       if (!best) continue;
+
+      // endless-map leash: out of everyone's reach long enough => despawn
+      if (bestD > ZOMBIE_LEASH_PX) {
+        const since = this.zombieFarSince.get(zid) || wall;
+        this.zombieFarSince.set(zid, since);
+        if (wall - since > ZOMBIE_LEASH_MS) {
+          this.state.zombies.delete(zid);
+          this.zombieFarSince.delete(zid);
+          continue;
+        }
+      } else if (this.zombieFarSince.has(zid)) {
+        this.zombieFarSince.delete(zid);
+      }
 
       if (bestD > rules.zombieContact) {
         const speed = Math.min(rules.zombieSpeed + this.state.world.wave * 3.5, 120);
@@ -316,6 +385,8 @@ export class SurvivalRoom extends Room {
     const now = Date.now();
     const t = tileOf(player.x, player.y);
     const xc = Math.floor(t.tx / CHUNK_TILES), yc = Math.floor(t.ty / CHUNK_TILES);
+
+    // scavengable crates generated into the endless chunks
     for (let cy = yc - 1; cy <= yc + 1; cy++) {
       for (let cx = xc - 1; cx <= xc + 1; cx++) {
         const chunk = genChunkData(this.mapId, cx, cy);
@@ -326,18 +397,58 @@ export class SurvivalRoom extends Room {
           if (Math.hypot(player.x - (s.wtx + .5) * TILE_SIZE,
             player.y - (s.wty + .5) * TILE_SIZE) > LOOT_RADIUS) continue;
 
+          this.grantLoot(sessionId, player, s.kind);
           this.looted.add(key);
-          this.lastLootPickup.set(sessionId, now);
-          const amount = 1 + (s.kind === 'food' && Math.random() < 0.4 ? 1 : 0);
-          if (s.kind === 'food') player.food = Math.min(FOOD_CAP, player.food + amount);
-          else player.med = Math.min(MED_CAP, player.med + 1);
-          this.broadcast('system', {
-            event: 'loot', name: player.name, kind: s.kind, amount,
-          });
+          // everyone (including late joiners) must hide this crate sprite
+          this.broadcast('looted', { keys: [key] });
           return;
         }
       }
     }
+
+    // dynamic drops left behind by defeated zombies
+    for (const [did, drop] of this.state.drops) {
+      if (Math.hypot(player.x - drop.x, player.y - drop.y) > LOOT_RADIUS) continue;
+      this.grantLoot(sessionId, player, drop.kind);
+      this.state.drops.delete(did);
+      return;
+    }
+  }
+
+  grantLoot(sessionId, player, kind) {
+    this.lastLootPickup.set(sessionId, Date.now());
+    const amount = kind === 'food' && Math.random() < 0.4 ? 2 : 1;
+    if (kind === 'food') player.food = Math.min(FOOD_CAP, player.food + amount);
+    else player.med = Math.min(MED_CAP, player.med + 1);
+    this.broadcast('system', { event: 'loot', name: player.name, kind, amount });
+  }
+
+  // -------------------------------------------------------------- combat ----
+  hitZombie(zid, zombie, player) {
+    const hp = Math.max(0, zombie.hp - ATTACK_DAMAGE);
+    zombie.hp = hp;
+    // knockback pushes the zombie away from the attacker
+    const ang = Math.atan2(zombie.y - player.y, zombie.x - player.x);
+    this.zombieMove(zombie, Math.cos(ang) * ATTACK_KNOCKBACK, Math.sin(ang) * ATTACK_KNOCKBACK);
+    if (hp > 0) return;
+
+    this.state.zombies.delete(zid);
+    this.zombieFarSince.delete(zid);
+    player.kills = Math.min(255, player.kills + 1);
+    const roll = Math.random();
+    const kind = roll < DROP_MED_CHANCE ? 'med' : roll < DROP_MED_CHANCE + DROP_FOOD_CHANCE ? 'food' : null;
+    if (kind) {
+      const id = 'd' + (++this.dropsSeq);
+      const drop = new Drop({
+        x: Math.round(zombie.x + (Math.random() - 0.5) * 22),
+        y: Math.round(zombie.y + (Math.random() - 0.5) * 22),
+        kind,
+      });
+      this.state.drops.set(id, drop);
+    }
+    this.broadcast('system', {
+      event: 'kill', name: player.name, drop: kind || '',
+    });
   }
 
   // ------------------------------------------------------------------ fire ---

@@ -66,7 +66,7 @@ export class BiomeSelectScene extends Phaser.Scene {
       box.on('pointerdown', () => { showChat(); this.scene.start('game', { mapId: biome.id }); });
     });
 
-    this.add.text(W / 2, 590, 'WASD move · Enter chat · walk onto crates to loot · [F] eat · [G] heal · hazards kill', {
+    this.add.text(W / 2, 590, 'WASD move · SPACE/left-click swing · walk onto crates to loot · [F] eat · [G] heal', {
       fontFamily: 'monospace', fontSize: '11px', color: '#555',
     }).setOrigin(0.5);
   }
@@ -104,11 +104,15 @@ export class GameScene extends Phaser.Scene {
 
     this.players = new Map();   // sessionId -> { sprite, shadow, tag, data }
     this.zombies = new Map();   // zombieId -> { sprite, shadow, data }
+    this.drops = new Map();     // dropId -> { sprite, shadow, data }
     this.chunks = new Map();    // chunkKey -> { img, crates, props, used }
     this.lootedSet = new Set(); // loot spot keys already scavenged (server truth)
     this.crateByKey = new Map(); // lootKey -> crate sprite
+    this.explored = new Set();  // chunk keys visited near the camera (radar trail)
     this.chunkCount = 0;
     this.meteors = [];          // {x, y, at} incoming meteor warnings
+    this.swings = [];           // {x, y, angle, t} visible melee arcs
+    this.faceAngle = 0;         // last move direction, fallback aim for swings
     this.chatActive = false;
     this.rejoining = false;
 
@@ -161,10 +165,22 @@ export class GameScene extends Phaser.Scene {
       u: Phaser.Input.Keyboard.KeyCodes.UP, d: Phaser.Input.Keyboard.KeyCodes.DOWN,
       l: Phaser.Input.Keyboard.KeyCodes.LEFT, r: Phaser.Input.Keyboard.KeyCodes.RIGHT,
       f: Phaser.Input.Keyboard.KeyCodes.F, g: Phaser.Input.Keyboard.KeyCodes.G,
+      space: Phaser.Input.Keyboard.KeyCodes.SPACE,
     });
     this.input.keyboard.on('keydown-ENTER', () => openChat());
     this.input.keyboard.on('keydown-F', () => { if (!this.chatActive) this.conn?.send('eat'); });
     this.input.keyboard.on('keydown-G', () => { if (!this.chatActive) this.conn?.send('heal'); });
+    this.input.keyboard.on('keydown-SPACE', () => {
+      if (!this.chatActive) this.conn?.send('attack', { angle: this.faceAngle });
+    });
+    // left-click swings toward the mouse aim point
+    this.input.on('pointerdown', (p) => {
+      if (this.chatActive || !p?.leftButtonDown()) return;
+      const me = this.players.get(this.localSid);
+      if (!me) return;
+      const ang = Math.atan2(p.worldY - me.sprite.y, p.worldX - me.sprite.x);
+      if (Number.isFinite(ang)) this.conn?.send('attack', { angle: ang });
+    });
 
     // HUD
     this.hud = {
@@ -185,6 +201,12 @@ export class GameScene extends Phaser.Scene {
     this.hudLayer.add(this.hud.bar, this.hud.biome, this.hud.statusRight, this.hud.inv);
 
     this.overlayTimer = 0;
+
+    // combat fx layer (world space) + hud radar
+    this.swingFx = this.add.graphics().setDepth(76);
+    this.worldLayer.add(this.swingFx);
+    this.minimap = this.add.graphics().setScrollFactor(0).setDepth(102);
+    this.hudLayer.add(this.minimap);
   }
 
   // retry a few times with backoff before surrendering to the error screen
@@ -240,6 +262,19 @@ export class GameScene extends Phaser.Scene {
         case 'healed':
           pushChat({ from: '☠ doom', text: `${msg.name} patched up with a medkit 💊` });
           break;
+        case 'swing':
+          this.swings.push({
+            x: msg.x, y: msg.y,
+            angle: (msg.angle / 255) * Math.PI * 2, t: 0,
+          });
+          break;
+        case 'kill': {
+          const dropText = msg.drop === 'med' ? ' — dropped a 💊 medkit'
+            : msg.drop === 'food' ? ' — dropped 🍖 rations' : '';
+          pushChat({ from: '☠ doom', text: `${msg.name} took down a zombie${dropText}` });
+          this.cameras.main.shake(120, 0.002);
+          break;
+        }
         case 'meteor':
           this.meteors.push({ x: msg.x, y: msg.y, at: performance.now() + this.biome.rules.meteorLeadMs });
           this.cameras.main.shake(400, 0.0025);
@@ -282,6 +317,21 @@ export class GameScene extends Phaser.Scene {
     c.onRemove('zombies', (_z, zid) => {
       const w = this.zombies.get(zid);
       if (w) { w.sprite.destroy(); w.shadow?.destroy(); this.zombies.delete(zid); }
+    });
+
+    // dynamic ground drops from defeated zombies
+    c.onAdd('drops', (drop, did) => {
+      const sprite = this.add.image(drop.x, drop.y, 'supply')
+        .setDepth(4).setOrigin(0.5, 1).setScale(0.8)
+        .setTint(drop.kind === 'med' ? 0xff9ec4 : 0xffd27a);
+      const shadow = this.add.image(drop.x, drop.y, 'shadow').setDepth(3).setAlpha(0.4);
+      this.worldLayer.add(sprite, shadow);
+      this.drops.set(did, { sprite, shadow, data: drop });
+    });
+
+    c.onRemove('drops', (_d, did) => {
+      const w = this.drops.get(did);
+      if (w) { w.sprite.destroy(); w.shadow?.destroy(); this.drops.delete(did); }
     });
   }
 
@@ -327,6 +377,7 @@ export class GameScene extends Phaser.Scene {
 
         const entry = { img, texKey, crates, props, used: this.chunkCount };
         this.chunks.set(key, entry);
+        this.explored.add(key);
       }
     }
 
@@ -360,9 +411,9 @@ export class GameScene extends Phaser.Scene {
       const dx = (k.right.isDown || k.r.isDown ? 1 : 0) - (k.left.isDown || k.l.isDown ? 1 : 0);
       const dy = (k.down.isDown || k.d.isDown ? 1 : 0) - (k.up.isDown || k.u.isDown ? 1 : 0);
       this.conn.sendInput(dx, dy, time);
+      if (dx || dy) this.faceAngle = Math.atan2(dy, dx);
 
-      // (keys F and G are handled by dedicated keydown handlers in create())
-      void k.f; void k.g;
+      void k.f; void k.g; void k.space; // handled by dedicated keydown handlers
     } else {
       this.conn.sendInput(0, 0, time);
     }
@@ -374,12 +425,67 @@ export class GameScene extends Phaser.Scene {
     lerpGroup(this.players, dt, 12);
     lerpGroup(this.zombies, dt, 10);
 
+    this.drawSwings(dt);
+
     this.overlayTimer += deltaMs;
     if (this.overlayTimer >= 200) {
       this.overlayTimer = 0;
       this.redrawOverlays();
       this.redrawHUD();
+      this.redrawMinimap();
     }
+  }
+
+  // melee swing arcs fade over ~0.25s
+  drawSwings(dt) {
+    const fx = this.swingFx;
+    fx.clear();
+    for (const s of this.swings) s.t += dt;
+    this.swings = this.swings.filter((s) => s.t < 0.25);
+    for (const s of this.swings) {
+      const a = 1 - s.t / 0.25;
+      fx.lineStyle(5, 0xffffff, a * 0.85);
+      fx.beginPath();
+      fx.arc(s.x, s.y, 54, s.angle - 1.25, s.angle + 1.25, false);
+      fx.strokePath();
+      fx.lineStyle(2, 0xffffff, a * 0.4);
+      fx.beginPath();
+      fx.arc(s.x, s.y, 62, s.angle - 1.25, s.angle + 1.25, false);
+      fx.strokePath();
+    }
+  }
+
+  // pocket radar: explored chunk trail + nearby threats, bottom-right
+  redrawMinimap() {
+    const me = this.players.get(this.localSid);
+    if (!me?.data) { this.minimap.clear(); return; }
+    const mm = this.minimap;
+    mm.clear();
+    const W = 120, H = 88, s = 8 / CHUNK_PX;
+    const ox = this.scale.width - W - 12, oy = this.scale.height - H - 12;
+    panel(mm, ox, oy, W, H);
+    const cx0 = ox + W / 2 - me.sprite.x * s, cy0 = oy + H / 2 - me.sprite.y * s;
+
+    mm.fillStyle(0x3d444d, 0.85);
+    for (const key of this.explored) {
+      const [cx, cy] = key.split(':').map(Number);
+      const mx = cx0 + cx * CHUNK_PX * s, my = cy0 + cy * CHUNK_PX * s;
+      if (mx < ox + 1 || my < oy + 1 || mx > ox + W - 9 || my > oy + H - 9) continue;
+      mm.fillRect(mx, my, 7.6, 7.6);
+    }
+
+    const dot = (wx, wy, color, r) => {
+      const mx = cx0 + wx * s, my = cy0 + wy * s;
+      if (mx < ox + 2 || my < oy + 2 || mx > ox + W - 2 || my > oy + H - 2) return;
+      mm.fillStyle(color, 0.95).fillCircle(mx, my, r);
+    };
+    for (const w of this.drops.values()) dot(w.data.x, w.data.y, 0xffd27a, 2);
+    for (const z of this.zombies.values()) dot(z.data.x, z.data.y, 0xd83b2e, 2.4);
+    for (const p of this.players.values()) {
+      if (p.data === me.data) continue;
+      dot(p.data.x, p.data.y, 0x5ecfff, 2.2);
+    }
+    dot(me.data.x, me.data.y, 0xffffff, 3);
   }
 
   state() { return this.conn.room ? this.conn.room.state : null; }
@@ -519,7 +625,9 @@ export class GameScene extends Phaser.Scene {
     let fraction = 0, color = 0x9ee05a, label = '';
     if (this.biome.flooded) {
       fraction = world.waterLevel; color = 0x2f89b5;
-      label = `🌊 water ${(world.waterLevel * 100).toFixed(0)}% — climb high, forever`;
+      label = world.waterLevel >= (this.biome.rules.waterCap ?? 0.9)
+        ? `🌊 flood peaked — the highland islands are safe`
+        : `🌊 water ${(world.waterLevel * 100).toFixed(0)}% — climb high`;
     } else if (this.biome.heat) {
       fraction = Math.max(0, Math.min(1, (world.temp - 26) / 29));
       color = fraction > 0.6 ? 0xff5522 : 0xe8a83c;
@@ -550,10 +658,10 @@ export class GameScene extends Phaser.Scene {
     bar.fillStyle(hungerFrac < 0.2 ? 0xd83b2e : 0xe8a83c, 1).fillRect(14, 64, 216 * hungerFrac, 8);
     this.hud.inv.setText(hungerFrac <= 0
       ? `🍖 0 · STARVING! Eat! [F]`
-      : `🍖 ×${me ? me.food : 0}  💊 ×${me ? me.med : 0}   ·   [F] eat  [G] heal`);
+      : `🍖 ×${me ? me.food : 0}  💊 ×${me ? me.med : 0}  ·  [F] eat  [G] heal  [SPACE] swing`);
 
     this.hud.statusRight.setText(
-      `${this.biome.name} · ${this.players.size} survivors · ${world.clock}s survived`);
+      `${this.biome.name} · ⚔${me ? me.kills : 0} · ${this.players.size} survivors · ${world.clock}s survived`);
   }
 }
 

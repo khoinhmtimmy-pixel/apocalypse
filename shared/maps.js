@@ -47,7 +47,7 @@ export const BIOMES = {
   flooded_world: {
     id: 'flooded_world',
     name: 'Flooded World',
-    desc: 'The water never stops rising. An endless oceanic world — climb forever toward high ground, loot as you go.',
+    desc: 'Endless archipelago. The flood creeps toward its peak — climb and hop the dry highland islands forever.',
     palette: {
       ground1: 0x62914a, ground2: 0x578341, water: 0x16505c,
       wall: 0x6e6e73, wallTop: 0x8a8a90, shade: 0x2c6140, waterTint: 0x246a80,
@@ -56,7 +56,8 @@ export const BIOMES = {
     flooded: true, heat: false, frost: false, toxic: false,
     zombies: false, meteors: false, zoneKind: null,
     rules: {
-      waterRate: 0.0050,       // waterLevel 0..1, reaches full in ~200s
+      waterRate: 0.0050,       // waterLevel 0..1, reaches the cap in ~200s
+      waterCap: 0.90,          // the peak flood — dry highlands stay reachable
       submergedDps: 4,
     },
   },
@@ -198,7 +199,7 @@ export function heightAt(mapId, tx, ty) {
 }
 
 function nearPlaza(wtx, wty, r) {
-  return Math.abs(wtx + .5 - PLAZA.x) < r && Math.abs(wty + .5 - PLAZA.ty) < r;
+  return Math.abs(wtx + .5 - PLAZA.x) < r && Math.abs(wty + .5 - PLAZA.y) < r;
 }
 
 // ------------------------------------------------------------- chunks ------

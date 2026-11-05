@@ -3,8 +3,8 @@
 2D top-down multiplayer survival game with an **endless world**. Survive apocalyptic
 biomes online with other people:
 
-- **Zombie City** — an endless ruined city, accumulating hordes
-- **Flooded World** — the water never stops rising; climb forever toward high ground
+- **Zombie City** — an endless ruined city, accumulating hordes. Melee swings ([Space] / left-click) take zombies down; they sometimes drop rations and medkits.
+- **Flooded World** — the flood creeps toward its peak; chain forever between the dry highland islands
 - **Heat Wastes** — heat waves + spreading wildfires across an endless desert
 - **Frost Wastes** — freezing cold fronts; huddle at campfires or freeze
 - **Toxic Bog** — fungal gas surges; Shelter in clean-air domes
@@ -25,10 +25,15 @@ biomes online with other people:
 
 - **Hunger** drains constantly. At zero, you **starve and lose health**.
 - **Loot**: walk onto supply crates scattered across the endless world to scavenge
-  rations 🍖 and medkits 💊. Late joiners receive the true scavenged state.
+  rations 🍖 and medkits 💊. Downed zombies drop some of their supplies too.
+  Scavenged crates stay scavenged for everyone (late joiners get the true list).
+- **Combat**: [Space] or left-click swings a melee arc toward your aim; the server
+  arbitrates reach, arc, cooldown, knockback and every drop.
 - **[F] eat** a ration (restores hunger + a little health), **[G] heal** with a medkit.
 - The map is **endless**: walk forever; each chunk regenerates deterministically
-  from its (map, x, y) so the world is identical for every player.
+  from its (map, x, y) so the world is identical for every player. A pocket
+  **radar** (bottom-right) trails your explored chunks and shows nearby threats.
+- When you drift away, out-of-reach zombies fade out instead of chasing forever.
 
 ## Run it
 
@@ -51,6 +56,7 @@ npm run smoke   # headless joins all six biomes, moves, checks state sync,
 ## Controls
 
 - WASD / arrows — move (server-authoritative: the client sends input intents, never positions)
+- [Space] / left-click — melee swing toward your aim direction
 - Enter — chat, esc to stop
 - Walk onto a supply crate — loot it (rations / medkits)
 - F — eat a ration · G — use a medkit

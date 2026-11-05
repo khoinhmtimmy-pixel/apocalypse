@@ -20,6 +20,13 @@ export const Zombie = schema({
   hp: t.uint8().default(30),
 }, 'Zombie');
 
+// Dynamic loot drops: killed zombies leave rations/medkits on the ground.
+export const Drop = schema({
+  x: t.int32().default(0),
+  y: t.int32().default(0),
+  kind: t.string().default('food'), // 'food' | 'med'
+}, 'Drop');
+
 // Wildfires: position + birth time (world seconds). Radius grows from birth
 // and is computed on both sides from world.clock — no radius sync needed.
 export const Fire = schema({
@@ -42,5 +49,6 @@ export const SurvivalState = schema({
   players: t.map(Player),
   zombies: t.map(Zombie),
   fires: t.map(Fire),
+  drops: t.map(Drop),
   world: World,
 }, 'SurvivalState');
