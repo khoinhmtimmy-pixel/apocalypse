@@ -4,7 +4,7 @@
 // The full static map is painted once into a canvas texture; actor/prop
 // sprites are generated at boot from the biome palette.
 import Phaser from 'phaser';
-import { BIOMES, TILE_SIZE, CHUNK_TILES, CHUNK_PX, genChunkData } from '../shared/maps.js';
+import { BIOMES, TILE, TILE_SIZE, CHUNK_TILES, CHUNK_PX, CITY_PITCH, CITY_ROAD_W, genChunkData } from '../shared/maps.js';
 
 const P = 4; // 1 "minecraft block pixel" = 4px in a 32px tile => 8 blocks/tile
 const S = 32;
@@ -28,6 +28,8 @@ function shade(hex, delta) {
 }
 
 function hash(n) { return ((n * 2654435761) >>> 0); }
+
+function hexOf(n) { return '#' + (n >>> 0).toString(16).padStart(6, '0'); }
 
 // ------------------------------------------------------- texture factory ---
 
@@ -87,6 +89,61 @@ function paintWall(ctx, ax, ay, pal) {
       ctx.fillStyle = 'rgba(0,0,0,0.30)';
       ctx.fillRect(x, y + h - 3, w, 3);  // bottom shadow
       ctx.fillRect(x + w - 3, y, 3, h);  // right shadow
+    }
+  }
+}
+
+// street: asphalt with chunky wear and the odd tar patch
+function paintAsphalt(ctx, ax, ay, pal, r) {
+  const base = pal.road ?? 0x34373c;
+  ctx.fillStyle = hexOf(base);
+  ctx.fillRect(ax, ay, S, S);
+  for (let i = 0; i < 7; i++) {
+    const gx = Math.floor(r() * 8), gy = Math.floor(r() * 8);
+    ctx.fillStyle = hexOf(shade(base, r() > 0.5 ? 12 : -12));
+    ctx.fillRect(ax + gx * P, ay + gy * P, P, P);
+  }
+  if (r() > 0.82) {
+    ctx.fillStyle = 'rgba(0,0,0,0.22)';
+    ctx.fillRect(ax + Math.floor(r() * 5) * P, ay + Math.floor(r() * 5) * P, P * 2, P * 2);
+  }
+}
+
+// kerbside pavement: pale slabs with dark joints
+function paintPavement(ctx, ax, ay, pal, r) {
+  const base = pal.kerb ?? 0x6e737b;
+  ctx.fillStyle = hexOf(base);
+  ctx.fillRect(ax, ay, S, S);
+  ctx.fillStyle = hexOf(shade(base, -18));
+  for (let g = 8; g < S; g += 8) { ctx.fillRect(ax, ay + g, S, 1); ctx.fillRect(ax + g, ay, 1, S); }
+  ctx.fillStyle = hexOf(shade(base, 12));
+  for (let i = 0; i < 3; i++) {
+    const gx = Math.floor(r() * 8), gy = Math.floor(r() * 8);
+    ctx.fillRect(ax + gx * P, ay + gy * P, P, P);
+  }
+  if (r() > 0.86) {
+    ctx.fillStyle = 'rgba(0,0,0,0.18)';
+    ctx.fillRect(ax + Math.floor(r() * 4) * P, ay + Math.floor(r() * 4) * P, P * 2, P);
+  }
+}
+
+// city block: concrete facade, sunlit top edge, 2×2 windows (some still lit)
+function paintFacade(ctx, ax, ay, pal, r) {
+  const base = pal.wall ?? 0x5e6067, top = pal.wallTop ?? 0x767a82;
+  ctx.fillStyle = hexOf(base);
+  ctx.fillRect(ax, ay, S, S);
+  ctx.fillStyle = hexOf(top);
+  ctx.fillRect(ax, ay, S, 4);                       // sunlit parapet
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.fillRect(ax, ay + S - 3, S, 3);               // shadowed base
+  const lit = r() > 0.72;
+  for (let wy = 0; wy < 2; wy++) {
+    for (let wx = 0; wx < 2; wx++) {
+      const x = ax + 4 + wx * 14, y = ay + 8 + wy * 12;
+      ctx.fillStyle = '#141a20';
+      ctx.fillRect(x, y, 10, 8);                    // frame
+      ctx.fillStyle = lit && r() > 0.4 ? '#e8b64a' : '#243040';
+      ctx.fillRect(x + 1, y + 1, 8, 6);             // glass
     }
   }
 }
@@ -269,15 +326,30 @@ export function buildChunkTexture(scene, mapId, cx, cy) {
       const r = mulberry32(((wx * 73856093) ^ (wy * 19349663)) >>> 0);
       const nearCenter = Math.hypot(wx + .5 - 23.5, wy + .5 - 23.5) < 3.2;
 
-      if (chunk.tiles[i] === 2) {         // building
-        paintWall(ctx, ax, ay, pal);
+      const tile = chunk.tiles[i];
+      const mx = ((wx % CITY_PITCH) + CITY_PITCH) % CITY_PITCH;
+      const my = ((wy % CITY_PITCH) + CITY_PITCH) % CITY_PITCH;
+
+      if (tile === TILE.WALL) {           // building
+        if (biome.city) paintFacade(ctx, ax, ay, pal, r);
+        else paintWall(ctx, ax, ay, pal);
+      } else if (tile === TILE.ROAD) {    // street, with dashed centre line
+        paintAsphalt(ctx, ax, ay, pal, r);
+        const hRoad = my < CITY_ROAD_W, vRoad = mx < CITY_ROAD_W;
+        if (!nearCenter && hRoad !== vRoad) {  // no markings through a junction
+          ctx.fillStyle = hexOf(pal.lane ?? 0xd8b64a);
+          if (hRoad && (((wx % 4) + 4) % 4) < 2) ctx.fillRect(ax, ay + 15, S, 2);
+          if (vRoad && (((wy % 4) + 4) % 4) < 2) ctx.fillRect(ax + 15, ay, 2, S);
+        }
+      } else if (tile === TILE.SIDEWALK) { // pavement ring
+        paintPavement(ctx, ax, ay, pal, r);
       } else if (nearCenter) {            // spawn plaza dirt path
         paintDirt(ctx, ax, ay, pal, r);
       } else {                            // ground + decor + canopies
         const groundLight = ((wx * 7 + wy * 13) % 2) === 0;
         paintGround(ctx, ax, ay, pal, groundLight, r);
         paintDecor(ctx, ax, ay, pal, i, biome.name);
-        if (chunk.tiles[i] === 3) {       // leaf canopy over the ground
+        if (tile === TILE.SHADE) {        // leaf canopy over the ground
           paintLeaves(ctx, ax, ay, pal, r);
         }
       }

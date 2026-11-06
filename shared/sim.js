@@ -605,7 +605,15 @@ export function stepWorld(world, dtMs, nowMs) {
     if (bestD > rules.zombieContact) {
       const speed = Math.min(rules.zombieSpeed + world.world.wave * 3.5, 120) * world.diff.spd;
       const nx = (best.x - zombie.x) / bestD, ny = (best.y - zombie.y) / bestD;
-      zombieMove(world, zombie, nx * speed * dt, ny * speed * dt);
+      const step = speed * dt;
+      if (!zombieMove(world, zombie, nx * step, ny * step)) {
+        // wedged on a building corner: follow the wall instead of freezing
+        const side = wallSide(zid);
+        const sx = -ny * side, sy = nx * side;
+        if (!zombieMove(world, zombie, sx * step, sy * step)) {
+          zombieMove(world, zombie, -sx * step, -sy * step);
+        }
+      }
     } else if (wall - (metaOf(world, bestSid).lastZombieHit || 0) > rules.zombieAttackMs) {
       const bm = metaOf(world, bestSid);
       bm.lastZombieHit = wall;
@@ -809,8 +817,17 @@ function moveCharacter(world, char, dx, dy, speed, dt) {
 
 function zombieMove(world, zombie, vx, vy) {
   const nx = zombie.x + vx, ny = zombie.y + vy;
-  if (!isWallAt(world.mapId, nx, zombie.y)) zombie.x = Math.round(nx);
-  if (!isWallAt(world.mapId, zombie.x, ny)) zombie.y = Math.round(ny);
+  let moved = false;
+  if (!isWallAt(world.mapId, nx, zombie.y)) { zombie.x = Math.round(nx); moved = true; }
+  if (!isWallAt(world.mapId, zombie.x, ny)) { zombie.y = Math.round(ny); moved = true; }
+  return moved;
+}
+
+// Which way a zombie steps around a building corner. Picked per zombie so a
+// horde piling on one facade spreads out instead of shoving on one point.
+function wallSide(zid) {
+  const n = parseInt(String(zid).slice(1), 10);
+  return (Number.isFinite(n) ? n : 0) % 2 ? 1 : -1;
 }
 
 // ------------------------------------------------------------ life/death -----

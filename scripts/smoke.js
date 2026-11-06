@@ -44,6 +44,9 @@ async function run() {
 
       const me = room.state.players.get(room.sessionId);
       check('  player moved after input intent', me.x > 800, `x=${me.x}`);
+      // The real client streams input every frame; release it here or the
+      // survivor keeps running and outruns the horde during the waits below.
+      room.send('input', { dx: 0, dy: 0 });
       check('  world clock running', room.state.world.clock > 0, `clock=${room.state.world.clock}`);
       check('  hunger drains over time', me.hunger < 100, `hunger=${me.hunger}`);
       check('  loot/inventory fields sync', typeof me.food === 'number' && typeof me.med === 'number',

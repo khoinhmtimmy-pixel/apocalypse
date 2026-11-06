@@ -8,7 +8,7 @@
 
 // ---------------------------------------------------------------- biomes ---
 
-export const TILE = { GROUND: 0, WATER: 1, WALL: 2, SHADE: 3 };
+export const TILE = { GROUND: 0, WATER: 1, WALL: 2, SHADE: 3, ROAD: 4, SIDEWALK: 5 };
 export const TILE_SIZE = 32;            // px per tile
 export const CHUNK_TILES = 32;          // tiles per chunk edge
 export const CHUNK_PX = CHUNK_TILES * TILE_SIZE;   // px per chunk edge
@@ -30,9 +30,10 @@ export const BIOMES = {
       ground1: 0x494d52, ground2: 0x555a61, water: 0x1d4e5e,
       wall: 0x5e6067, wallTop: 0x767a82, shade: 0x2d5f3f, waterTint: 0x224455,
       fire: 0xff7a33, sky: 0x2a2c31, crack: true,
+      road: 0x34373c, kerb: 0x6e737b, lane: 0xd8b64a,
     },
     flooded: false, heat: false, frost: false, toxic: false,
-    zombies: true, meteors: false, zoneKind: null,
+    zombies: true, meteors: false, zoneKind: null, city: true,
     rules: {
       waveInterval: 12000,
       zombiesPerWave: 2,
@@ -218,6 +219,56 @@ function nearPlaza(wtx, wty, r) {
 
 const chunkCache = new Map();
 
+// --------------------------------------------------------- city layout ---
+// The ruined city is a street lattice, not scattered rubble: two-lane asphalt
+// roads every CITY_PITCH tiles, a one-tile pavement ring, and one building
+// inside each block. Every tile comes from its WORLD coordinate, so blocks line
+// up across chunk seams and the server and the browser generate the same maze.
+export const CITY_PITCH = 8;      // tiles per block, road included
+export const CITY_ROAD_W = 2;     // asphalt tiles at the start of each pitch
+const CITY_BLOCK_W = 4;           // buildable interior of a block
+
+const mod = (n, m) => ((n % m) + m) % m;
+
+function carveCity(mapId, tiles, wtx, wty) {
+  // roads + pavements
+  for (let ly = 0; ly < CHUNK_TILES; ly++) {
+    for (let lx = 0; lx < CHUNK_TILES; lx++) {
+      const gx = wtx(lx), gy = wty(ly);
+      const i = ly * CHUNK_TILES + lx;
+      if (nearPlaza(gx, gy, 6)) { tiles[i] = TILE.ROAD; continue; }  // paved spawn square
+      const mx = mod(gx, CITY_PITCH), my = mod(gy, CITY_PITCH);
+      if (mx < CITY_ROAD_W || my < CITY_ROAD_W) tiles[i] = TILE.ROAD;
+      else if (mx === CITY_ROAD_W || my === CITY_ROAD_W ||
+               mx === CITY_PITCH - 1 || my === CITY_PITCH - 1) tiles[i] = TILE.SIDEWALK;
+    }
+  }
+
+  // one building per block, seeded by the block's own coordinates
+  const b0x = Math.floor(wtx(0) / CITY_PITCH), b1x = Math.floor(wtx(CHUNK_TILES - 1) / CITY_PITCH);
+  const b0y = Math.floor(wty(0) / CITY_PITCH), b1y = Math.floor(wty(CHUNK_TILES - 1) / CITY_PITCH);
+  for (let by = b0y; by <= b1y; by++) {
+    for (let bx = b0x; bx <= b1x; bx++) {
+      const rng = mulberry32(hashString(`city:${mapId}:${bx}:${by}`));
+      if (rng() < 0.12) continue;                        // park / empty lot
+      const w = 2 + Math.floor(rng() * 3), h = 2 + Math.floor(rng() * 3);
+      const ox = Math.floor(rng() * (CITY_BLOCK_W - w + 1));
+      const oy = Math.floor(rng() * (CITY_BLOCK_W - h + 1));
+      const x0 = bx * CITY_PITCH + CITY_ROAD_W + 1 + ox;
+      const y0 = by * CITY_PITCH + CITY_ROAD_W + 1 + oy;
+      const lx0 = wtx(0), ly0 = wty(0);
+      for (let y = y0; y < y0 + h; y++) {
+        for (let x = x0; x < x0 + w; x++) {
+          if (nearPlaza(x, y, 6)) continue;
+          const lx = x - lx0, ly = y - ly0;
+          if (lx < 0 || ly < 0 || lx >= CHUNK_TILES || ly >= CHUNK_TILES) continue;
+          tiles[ly * CHUNK_TILES + lx] = TILE.WALL;
+        }
+      }
+    }
+  }
+}
+
 // One chunk of an endless world: 32×32 tiles + deterministic features.
 // lootSpots: crates to scavenge · nests: zombie spawn sites · safeZones:
 // shade canopies / campfires / clean-air domes · fireSeeds: wildfire origins.
@@ -233,8 +284,10 @@ export function genChunkData(mapId, cx, cy) {
   const wtx = (tx) => cx * CHUNK_TILES + tx;
   const wty = (ty) => cy * CHUNK_TILES + ty;
 
-  // Buildings: 1–2 ruin blocks per chunk, never inside the spawn plaza.
-  const buildingCount = 1 + Math.floor(rng() * 2);
+  // Buildings: the zombie city carves a street grid; other biomes scatter
+  // 1–2 ruin blocks per chunk, never inside the spawn plaza.
+  if (biome.city) carveCity(mapId, tiles, wtx, wty);
+  const buildingCount = biome.city ? 0 : 1 + Math.floor(rng() * 2);
   for (let b = 0; b < buildingCount; b++) {
     const bw = 2 + Math.floor(rng() * 4), bh = 2 + Math.floor(rng() * 4);
     const tx = 1 + Math.floor(rng() * (CHUNK_TILES - bw - 2));
@@ -259,7 +312,7 @@ export function genChunkData(mapId, cx, cy) {
     for (let n = 0; n < 40; n++) {
       const tx = Math.floor(rng() * CHUNK_TILES), ty = Math.floor(rng() * CHUNK_TILES);
       const i = ty * CHUNK_TILES + tx;
-      if (tiles[i] !== TILE.GROUND) continue;
+      if (tiles[i] === TILE.WALL || tiles[i] === TILE.SHADE) continue;
       if (minPlazaDist > 0) {
         const d = Math.hypot(wtx(tx) + .5 - PLAZA.x, wty(ty) + .5 - PLAZA.y);
         if (d < minPlazaDist) continue;
