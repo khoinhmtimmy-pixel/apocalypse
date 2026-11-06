@@ -12,6 +12,16 @@ export const Player = schema({
   med: t.uint8().default(0),       // medkits carried — [G] to heal
   kills: t.uint8().default(0),
   deaths: t.uint8().default(0),
+  // Đêm Xác Sống port: armory, coin economy, consumables and score
+  coin: t.uint16().default(5),     // in-room wallet (server-authoritative)
+  score: t.uint32().default(0),
+  gunId: t.uint8().default(0),     // equipped gun index into shared/guns.js
+  ammo: t.uint8().default(0),      // current magazine (server-simulated reload)
+  petId: t.uint8().default(0),     // 0 = none, else SHOP.pets id
+  bombs: t.uint8().default(0),     // [Z] explosives
+  haste: t.uint8().default(0),     // [V] speed charges
+  up: t.map('uint8'),              // upgrade key -> level
+  own: t.map('uint8'),             // owned gun id -> 1
 }, 'Player');
 
 export const Zombie = schema({

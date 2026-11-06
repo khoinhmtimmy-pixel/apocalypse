@@ -71,19 +71,53 @@ async function run() {
         let target = null;
         for (let i = 0; i < 60 && !target; i++) {
           await wait(500);
+          // stay inside the server's melee reach (ATTACK_RANGE = 64px)
           target = [...room.state.zombies.values()]
-            .find((z) => Math.hypot(z.x - me0.x, z.y - me0.y) < 70) || null;
+            .find((z) => Math.hypot(z.x - me0.x, z.y - me0.y) < 48) || null;
         }
         if (target) {
-          const before = room.state.kills ?? 0;
-          room.send('attack', { angle: Math.atan2(target.y - me0.y, target.x - me0.x) });
-          await wait(600);
+          const hpSum = () => [...room.state.zombies.values()].reduce((a, z) => a + z.hp, 0);
+          const kills0 = me0.kills, hp0 = hpSum();
+          let landed = false;
+          for (let i = 0; i < 6 && !landed; i++) {
+            const me = room.state.players.get(room.sessionId);
+            const t = [...room.state.zombies.values()]
+              .find((z) => Math.hypot(z.x - me.x, z.y - me.y) < 48);
+            if (!t) { await wait(400); continue; }
+            room.send('attack', { angle: Math.atan2(t.y - me.y, t.x - me.x) });
+            await wait(500);
+            const after = room.state.players.get(room.sessionId);
+            landed = after.kills > kills0 || hpSum() < hp0;
+          }
           const me1 = room.state.players.get(room.sessionId);
-          check('  melee swing scored kills', me1.kills > me0.kills || room.state.drops.size >= 0,
-            `kills=${me0.kills}->${me1.kills}`);
+          check('  melee swing connects', landed, `kills=${kills0} hpSum ${hp0}->${hpSum()}`);
+          check('  kill pays coins + score', me1.coin > 5 || me1.score > 0,
+            `coin=${me1.coin} score=${me1.score}`);
         } else {
           check('  zombie approach (attack path skipped)', false, 'none came close in 30s');
         }
+
+        // Đêm Xác Sống port: shooting spends ammo, empty wallet cannot buy
+        const me2 = room.state.players.get(room.sessionId);
+        const gunMag = me2.ammo;
+        room.send('shoot', { angle: 0 });
+        await wait(400);
+        check('  shooting drains the magazine', me2.ammo < gunMag, `${gunMag}->${me2.ammo}`);
+
+        let buyEvent = null;
+        room.onMessage('system', (m) => {
+          if (m && (m.event === 'bought' || m.event === 'buyfail')) buyEvent = m;
+        });
+        const coinBefore = me2.coin;
+        room.send('buy', { kind: 'gun', id: 1 }); // SMG Mk1 costs 50
+        await wait(400);
+        const me3 = room.state.players.get(room.sessionId);
+        check('  shop rejects unaffordable purchases',
+          me3.coin === coinBefore && !me3.own.get('1'),
+          `coin=${me3.coin} event=${buyEvent ? buyEvent.event : 'none'}`);
+
+        const upBefore = me2.up.get('mag') || 0;
+        check('  upgrade map starts empty', upBefore === 0, `mag lvl=${upBefore}`);
       }
 
       room.leave();

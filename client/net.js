@@ -11,8 +11,8 @@ export class GameConnection {
     this.client = new Client(`${proto}://${location.host}`);
   }
 
-  async join(mapId, name) {
-    this.room = await this.client.joinOrCreate('survival', { mapId, name });
+  async join(mapId, name, diff) {
+    this.room = await this.client.joinOrCreate('survival', { mapId, name, diff });
     this.callbacks = Callbacks.get(this.room);
     return this;
   }

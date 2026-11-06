@@ -34,6 +34,38 @@
       font: inherit; padding: 8px 18px; cursor: pointer;
       background: #2b2f36; color: #eee; border: 1px solid #44484f; border-radius: 4px;
     }
+
+    /* Đêm Xác Sống port: in-run shop overlay (server-authoritative) */
+    #shop {
+      display: none; position: fixed; inset: 0; z-index: 15;
+      background: rgba(8, 12, 16, 0.92); color: #e6efe3;
+      font-family: ui-monospace, Menlo, Consolas, monospace;
+      flex-direction: column; align-items: center; padding: 16px; box-sizing: border-box;
+    }
+    #shop.on { display: flex; }
+    .shop-head { display: flex; align-items: center; gap: 18px; width: min(100%, 860px); }
+    .shop-head h2 { margin: 0; color: #9be15d; font-size: 20px; }
+    #shop-coin { color: #ffc83d; font-weight: 800; font-size: 16px; }
+    #shop-msg { flex: 1; color: #ffc83d; font-size: 12px; min-height: 1.3em; }
+    #shop-x { background: #2b2f36; color: #eee; border: 1px solid #44484f; border-radius: 6px; padding: 6px 12px; cursor: pointer; font: inherit; }
+    #shop-tabs { display: flex; gap: 6px; margin-top: 10px; }
+    #shop-tabs button { background: #1a2420; color: #e6efe3; border: 1px solid #ffffff20; border-radius: 6px; padding: 6px 14px; cursor: pointer; font: inherit; }
+    #shop-tabs button.on { background: #9be15d; color: #0b1411; }
+    #shop-list {
+      margin-top: 10px; width: min(100%, 860px); flex: 1; overflow-y: auto;
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 7px; align-content: start;
+    }
+    .sit {
+      background: #12201a; border: 1px solid #ffffff14; border-left: 4px solid #5fbf6a;
+      border-radius: 8px; padding: 8px; font-size: 11px; line-height: 1.4; text-align: left;
+    }
+    .sit h3 { margin: 0; font-size: 1.05em; }
+    .sit small { color: #ffc83d; font-weight: 800; }
+    .sit p { margin: 3px 0 6px; color: #8aa396; }
+    .sit button { width: 100%; padding: 6px; font: inherit; font-weight: 800; border: 0; border-radius: 6px; cursor: pointer; background: #ffc83d; color: #241a00; }
+    .sit button:disabled { background: #2a3631; color: #6d8176; cursor: default; }
+    .sit button.eq { background: #2f5d33; color: #d8f5d0; }
+    .shop-note { margin-top: 8px; color: #6d8176; font-size: 11px; }
   </style>
 </head>
 <body>
@@ -42,6 +74,22 @@
   <div id="chat-box">
     <div id="chat-log"></div>
     <input id="chat-input" placeholder="say something… (esc to close)" maxlength="140" autocomplete="off" />
+  </div>
+
+  <div id="shop" class="off">
+    <div class="shop-head">
+      <h2>🛒 Shop</h2>
+      <span id="shop-coin">💰 0</span>
+      <span id="shop-msg"></span>
+      <button id="shop-x">✕ close</button>
+    </div>
+    <div id="shop-tabs">
+      <button data-tab="guns" class="on">Guns</button>
+      <button data-tab="up">Upgrades</button>
+      <button data-tab="items">Items &amp; Pets</button>
+    </div>
+    <div id="shop-list"></div>
+    <p class="shop-note">Coins reset each run — earn them by dropping zombies, spend them before doom wins.</p>
   </div>
 
   <div id="conn-error">

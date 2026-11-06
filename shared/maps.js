@@ -148,6 +148,18 @@ export const BIOMES = {
   },
 };
 
+// --------------------------------------------------------- difficulty ---
+
+// Difficulty picks for the select screen (Đêm Xác Sống-style). Applied by the
+// room to zombie stats/hazards and coin payouts; everyone in a room shares the
+// difficulty of whoever created it.
+export const DIFFS = [
+  { id: 0, name: 'Easy',   hp: 0.8, spd: 0.85, dmg: 0.7, coin: 0.8,  waves: 0.9 },
+  { id: 1, name: 'Normal', hp: 1,   spd: 1,    dmg: 1,   coin: 1,    waves: 1 },
+  { id: 2, name: 'Brutal', hp: 1.45, spd: 1.15, dmg: 1.4, coin: 1.5, waves: 1.3 },
+  { id: 3, name: 'Doom',   hp: 2.1, spd: 1.32, dmg: 1.9, coin: 2.2,  waves: 1.6 },
+];
+
 // ------------------------------------------------------------ utilities ---
 
 function hashString(str) {

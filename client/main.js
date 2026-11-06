@@ -7,8 +7,9 @@
 // renders the HUD so the UI stays pixel-stable at any zoom level.
 import Phaser from 'phaser';
 import {
-  BIOMES, TILE_SIZE, CHUNK_TILES, CHUNK_PX, genChunkData, heightAt,
+  BIOMES, TILE_SIZE, CHUNK_TILES, CHUNK_PX, genChunkData, heightAt, DIFFS,
 } from '../shared/maps.js';
+import { GUNS, GUN_NAMES, gunOf, SHOP } from '../shared/guns.js';
 import { buildTextures, buildChunkTexture, addVignette } from './tiles.js';
 import { GameConnection } from './net.js';
 
@@ -16,6 +17,7 @@ let conn = null; // module-scoped so scene restarts can leave cleanly
 
 const ZOOM = 1.55;            // how tightly the camera hugs the player
 const CHUNK_KEEP = 16;        // max chunk textures/props held at once
+const SHOOT_THROTTLE_MS = 70; // client-side rate cap (the server is strict too)
 
 // ------------------------------------------------------------ biome select ---
 
@@ -25,11 +27,14 @@ export class BiomeSelectScene extends Phaser.Scene {
   create() {
     if (conn) { conn.leave(); conn = null; }
     hideChat();
-    // shareable deep link: /?map=zombie_city skips the menu
-    const preset = new URLSearchParams(location.search).get('map');
+    // shareable deep link: /?map=zombie_city&diff=2 skips the menu
+    const params = new URLSearchParams(location.search);
+    const preset = params.get('map');
+    const presetDiff = params.get('diff');
+    if (presetDiff) this.diff = Math.max(0, Math.min(DIFFS.length - 1, Number(presetDiff) | 0));
     if (preset && BIOMES[preset]) {
       showChat();
-      this.scene.start('game', { mapId: preset });
+      this.scene.start('game', { mapId: preset, diff: this.diff });
       return;
     }
     const W = this.scale.width;
@@ -63,10 +68,35 @@ export class BiomeSelectScene extends Phaser.Scene {
       }).setOrigin(1, 1);
       box.on('pointerover', () => box.setFillStyle(0x33373d));
       box.on('pointerout', () => box.setFillStyle(0x26292f));
-      box.on('pointerdown', () => { showChat(); this.scene.start('game', { mapId: biome.id }); });
+      box.on('pointerdown', () => {
+        showChat();
+        this.scene.start('game', { mapId: biome.id, diff: this.diff ?? 1 });
+      });
     });
 
-    this.add.text(W / 2, 590, 'WASD move · SPACE/left-click swing · walk onto crates to loot · [F] eat · [G] heal', {
+    // difficulty row (Đêm Xác Sống port): applies when you create the room
+    this.add.text(W - 20, 528 - 12, 'DIFFICULTY — applies when you create a room', {
+      fontFamily: 'monospace', fontSize: '11px', color: '#777',
+    }).setOrigin(1, 0);
+    this.diffBtns = [];
+    DIFFS.forEach((d, i) => {
+      const b = this.add.rectangle(W - 460 + i * 118, 536, 108, 30,
+        this.diff === i ? 0x9be15d : 0x26292f)
+        .setStrokeStyle(2, 0x44484f).setInteractive({ useHandCursor: true });
+      const label = this.add.text(b.x, b.y, `${d.name}`,
+        { fontFamily: 'monospace', fontSize: '13px', color: this.diff === i ? '#0b1411' : '#b9c2bb' })
+        .setOrigin(0.5);
+      b.on('pointerdown', () => {
+        this.diff = i;
+        this.diffBtns.forEach((btn, j) => {
+          btn.btn.setFillStyle(j === i ? 0x9be15d : 0x26292f);
+          btn.label.setColor(j === i ? '#0b1411' : '#b9c2bb');
+        });
+      });
+      this.diffBtns.push({ btn: b, label });
+    });
+
+    this.add.text(W / 2, 588, 'WASD move · hold left-click to shoot · SPACE swings · B shop · [F] eat · [G] heal · Z bomb · V rush', {
       fontFamily: 'monospace', fontSize: '11px', color: '#555',
     }).setOrigin(0.5);
   }
@@ -84,7 +114,7 @@ function makeNameTag(scene, name) {
 export class GameScene extends Phaser.Scene {
   constructor() { super('game'); }
 
-  init(data) { this.mapId = data.mapId || 'zombie_city'; }
+  init(data) { this.mapId = data.mapId || 'zombie_city'; this.diff = data.diff ?? 1; }
 
   create() {
     window.__gameScene = this;
@@ -112,7 +142,12 @@ export class GameScene extends Phaser.Scene {
     this.chunkCount = 0;
     this.meteors = [];          // {x, y, at} incoming meteor warnings
     this.swings = [];           // {x, y, angle, t} visible melee arcs
-    this.faceAngle = 0;         // last move direction, fallback aim for swings
+    this.tracers = [];          // {x, y, vx, vy, life} bullet tracer fx
+    this.fx = [];               // {x, y, t, color} hit flashes
+    this.faceAngle = 0;         // last move direction, fallback aim
+    this.firing = false;        // left mouse held down
+    this.lastShootMs = 0;
+    this.shopOpen = false;
     this.chatActive = false;
     this.rejoining = false;
 
@@ -142,7 +177,7 @@ export class GameScene extends Phaser.Scene {
     }).setOrigin(0.5).setScrollFactor(0).setDepth(101);
     this.hudLayer.add(this.status);
 
-    this.joinWithRetry(this.mapId)
+    this.joinWithRetry(this.mapId, this.diff ?? 1)
       .then(() => this.wireRoom())
       .catch((err) => {
         console.error('Join failed after retries', err);
@@ -166,20 +201,52 @@ export class GameScene extends Phaser.Scene {
       l: Phaser.Input.Keyboard.KeyCodes.LEFT, r: Phaser.Input.Keyboard.KeyCodes.RIGHT,
       f: Phaser.Input.Keyboard.KeyCodes.F, g: Phaser.Input.Keyboard.KeyCodes.G,
       space: Phaser.Input.Keyboard.KeyCodes.SPACE,
+      rl: Phaser.Input.Keyboard.KeyCodes.R,
     });
-    this.input.keyboard.on('keydown-ENTER', () => openChat());
-    this.input.keyboard.on('keydown-F', () => { if (!this.chatActive) this.conn?.send('eat'); });
-    this.input.keyboard.on('keydown-G', () => { if (!this.chatActive) this.conn?.send('heal'); });
+    this.input.keyboard.on('keydown-ENTER', () => { if (!this.shopOpen) openChat(); });
+    this.input.keyboard.on('keydown-F', () => { if (!this.chatActive && !this.shopOpen) this.conn?.send('eat'); });
+    this.input.keyboard.on('keydown-G', () => { if (!this.chatActive && !this.shopOpen) this.conn?.send('heal'); });
     this.input.keyboard.on('keydown-SPACE', () => {
-      if (!this.chatActive) this.conn?.send('attack', { angle: this.faceAngle });
+      if (!this.chatActive && !this.shopOpen) this.conn?.send('attack', { angle: this.faceAngle });
     });
-    // left-click swings toward the mouse aim point
+    // Đêm Xác Sống port keys: shop / bomb / rush / reload / gun hotkeys
+    this.input.keyboard.on('keydown-B', () => { if (!this.chatActive) this.toggleShop(); });
+    this.input.keyboard.on('keydown-Z', () => { if (!this.chatActive && !this.shopOpen) this.conn?.send('bomb'); });
+    this.input.keyboard.on('keydown-V', () => { if (!this.chatActive && !this.shopOpen) this.conn?.send('haste'); });
+    this.input.keyboard.on('keydown-R', () => { if (!this.chatActive && !this.shopOpen) this.conn?.send('reload'); });
+    [1, 2, 3, 4, 5].forEach((_, i) => {
+      this.input.keyboard.on(`keydown-${['ONE', 'TWO', 'THREE', 'FOUR', 'FIVE'][i]}`, () => this.equipByClass(i));
+    });
+    this.input.keyboard.on('keydown-ESC', () => { if (this.shopOpen) this.toggleShop(false); });
+
+    // left click = shoot toward the mouse (hold to keep firing)
     this.input.on('pointerdown', (p) => {
-      if (this.chatActive || !p?.leftButtonDown()) return;
+      if (this.chatActive || this.shopOpen) return;
+      if (!p?.leftButtonDown()) return;
+      this.firing = true;
+      const me = this.players.get(this.localSid);
+      if (me) this.faceAngle = Math.atan2(p.worldY - me.sprite.y, p.worldX - me.sprite.x) || this.faceAngle;
+    });
+    this.input.on('pointerup', () => { this.firing = false; });
+    this.input.on('pointermove', (p) => {
+      if (this.firing && !this.chatActive && !this.shopOpen) {
+        const me = this.players.get(this.localSid);
+        if (me) {
+          const ang = Math.atan2(p.worldY - me.sprite.y, p.worldX - me.sprite.x);
+          if (Number.isFinite(ang)) this.faceAngle = ang;
+        }
+      }
+    });
+    // mouse wheel cycles owned guns (class 0..4 like the source game)
+    this.input.on('wheel', (_p, _o, _dx, dy) => {
+      if (this.chatActive || this.shopOpen) return;
       const me = this.players.get(this.localSid);
       if (!me) return;
-      const ang = Math.atan2(p.worldY - me.sprite.y, p.worldX - me.sprite.x);
-      if (Number.isFinite(ang)) this.conn?.send('attack', { angle: ang });
+      const cur = gunOf(me.gunId).cls;
+      for (let step = 1; step <= 5; step++) {
+        const cls = (cur + (dy > 0 ? step : 5 - step)) % 5;
+        if (this.equipByClass(cls)) break;
+      }
     });
 
     // HUD
@@ -201,21 +268,56 @@ export class GameScene extends Phaser.Scene {
     this.hudLayer.add(this.hud.bar, this.hud.biome, this.hud.statusRight, this.hud.inv);
 
     this.overlayTimer = 0;
+    initShopDom(this);
 
-    // combat fx layer (world space) + hud radar
+    // combat fx layers (world space) + hud radar
     this.swingFx = this.add.graphics().setDepth(76);
-    this.worldLayer.add(this.swingFx);
+    this.tracerFx = this.add.graphics().setDepth(74);
+    this.hitFx = this.add.graphics().setDepth(77);
+    this.worldLayer.add(this.swingFx, this.tracerFx, this.hitFx);
     this.minimap = this.add.graphics().setScrollFactor(0).setDepth(102);
     this.hudLayer.add(this.minimap);
   }
 
+  // equip the best owned gun of a class; returns true for wheel/hotkey chains
+  equipByClass(cls) {
+    const me = this.players.get(this.localSid);
+    if (!me) return false;
+    let best = -1;
+    for (const [idStr] of me.data.own) {
+      const g = gunOf(Number(idStr));
+      if (g.cls !== cls) continue;
+      if (best < 0 || g.grade > gunOf(best).grade) best = g.id;
+    }
+    if (best < 0) return false;
+    if (best !== me.data.gunId) this.conn?.send('equip', { gun: best });
+    return true;
+  }
+
+  // Đêm Xác Sống shop — DOM overlay, the server is still the only judge
+  toggleShop(force) {
+    const el = document.getElementById('shop');
+    if (!el) return;
+    const open = force != null ? force : !this.shopOpen;
+    el.classList.toggle('on', open);
+    this.shopOpen = open;
+    if (open) renderShop(this);
+  }
+
+  shopMsg(text, bad) {
+    const el = document.getElementById('shop-msg');
+    if (!el) return;
+    el.textContent = text || '';
+    el.style.color = bad ? '#ff8a7a' : '#ffc83d';
+  }
+
   // retry a few times with backoff before surrendering to the error screen
-  async joinWithRetry(mapId) {
+  async joinWithRetry(mapId, diff) {
     const delays = [1500, 3000, 5000];
     const name = localStorage.getItem('doomdays.name') || 'survivor';
     for (let attempt = 0; ; attempt++) {
       try {
-        return await this.conn.join(mapId, name);
+        return await this.conn.join(mapId, name, diff);
       } catch (err) {
         if (attempt >= delays.length) throw err;
         this.status.setText(`connecting… retry ${attempt + 1}`);
@@ -231,6 +333,18 @@ export class GameScene extends Phaser.Scene {
     window.__gameSend = (type, data) => c.send(type, data);
 
     c.onMessage('chat', (msg) => pushChat(msg));
+    // bullet fire broadcast: every client draws its own tracer fx
+    c.onMessage('shot', (msg) => {
+      const gun = gunOf(msg.gun);
+      for (let i = 0; i < (msg.n || 1); i++) {
+        const a = msg.angle + (i - ((msg.n - 1) / 2)) * Math.max(msg.spr, 0.09);
+        this.tracers.push({
+          x: msg.x, y: msg.y,
+          vx: Math.cos(a) * msg.v, vy: Math.sin(a) * msg.v,
+          life: (msg.life || 1.2) * 0.55, len: Math.min(46, 14 + gun.dmg * 0.5),
+        });
+      }
+    });
     c.onMessage('looted', (msg) => {
       for (const key of msg.keys || []) {
         this.lootedSet.add(key);
@@ -269,12 +383,40 @@ export class GameScene extends Phaser.Scene {
           });
           break;
         case 'kill': {
-          const dropText = msg.drop === 'med' ? ' — dropped a 💊 medkit'
-            : msg.drop === 'food' ? ' — dropped 🍖 rations' : '';
-          pushChat({ from: '☠ doom', text: `${msg.name} took down a zombie${dropText}` });
+          const dropText = msg.drop === 'med' ? ' · 💊 drop'
+            : msg.drop === 'food' ? ' · 🍖 drop' : '';
+          pushChat({
+            from: '☠ doom',
+            text: `${msg.name}${msg.cause === 'pet' ? "'s pet" : ''} downed a zombie +${msg.coin || 1}💰${dropText}`,
+          });
           this.cameras.main.shake(120, 0.002);
           break;
         }
+        case 'fx':
+          if (msg.kind === 'crit') this.fx.push({ x: msg.x, y: msg.y, t: 0, color: 0xffc83d });
+          break;
+        case 'bomb':
+          this.fx.push({ x: msg.x, y: msg.y, t: 0, color: 0xff8a1f, big: true });
+          this.cameras.main.shake(260, 0.005);
+          pushChat({ from: '☠ doom', text: `${msg.hits ? '💥 bomb hit ' + msg.hits + ' zombies' : '💥 bomb — Nothing in range'}` });
+          break;
+        case 'haste':
+          pushChat({ from: '☠ doom', text: `${msg.name} pops a rush [V] — pizza time!` });
+          break;
+        case 'pet':
+          this.fx.push({ x: msg.x, y: msg.y, t: 0, color: 0x9be15d });
+          break;
+        case 'reload':
+          if (msg.sid === this.localSid) pushChat({ from: '☠ doom', text: 'reloading…' });
+          break;
+        case 'bought':
+          pushChat({ from: '🛒 shop', text: msg.text });
+          this.shopMsg(msg.text);
+          if (this.shopOpen) renderShop(this);
+          break;
+        case 'buyfail':
+          this.shopMsg(msg.text || 'Not enough coins', true);
+          break;
         case 'meteor':
           this.meteors.push({ x: msg.x, y: msg.y, at: performance.now() + this.biome.rules.meteorLeadMs });
           this.cameras.main.shake(400, 0.0025);
@@ -405,8 +547,8 @@ export class GameScene extends Phaser.Scene {
     // keep the endless world painted around the camera
     this.syncChunks();
 
-    // input intents (skip while typing in chat) — always report release as 0,0
-    if (!this.chatActive) {
+    // input intents (skip while typing in chat or shopping) — release is always 0,0
+    if (!this.chatActive && !this.shopOpen) {
       const k = this.keys;
       const dx = (k.right.isDown || k.r.isDown ? 1 : 0) - (k.left.isDown || k.l.isDown ? 1 : 0);
       const dy = (k.down.isDown || k.d.isDown ? 1 : 0) - (k.up.isDown || k.u.isDown ? 1 : 0);
@@ -416,6 +558,68 @@ export class GameScene extends Phaser.Scene {
       void k.f; void k.g; void k.space; // handled by dedicated keydown handlers
     } else {
       this.conn.sendInput(0, 0, time);
+    }
+
+    // hold-to-fire: the server is the true judge of cooldown and ammo
+    if (this.firing && !this.chatActive && !this.shopOpen) {
+      const me = this.players.get(this.localSid);
+      if (me) {
+        const pointer = this.input.activePointer;
+        const aim = Math.atan2(pointer.worldY - me.sprite.y, pointer.worldX - me.sprite.x);
+        if (Number.isFinite(aim)) this.faceAngle = aim;
+        if (time - this.lastShootMs > SHOOT_THROTTLE_MS) {
+          this.lastShootMs = time;
+          this.conn?.send('shoot', { angle: aim });
+        }
+      }
+    } else if (!this.firing) {
+      this.firing = false;
+    }
+
+    // bullet tracers + hit flashes (pure client fx; damage is server-side)
+    const tr = this.tracerFx;
+    tr.clear();
+    for (const b of this.tracers) {
+      b.x += b.vx * dt; b.y += b.vy * dt; b.life -= dt;
+      const l = Math.min(b.len, Math.hypot(b.vx, b.vy) * 0.03);
+      const nx = (b.vx || 0.001) / Math.hypot(b.vx, b.vy), ny = b.vy / Math.hypot(b.vx, b.vy);
+      tr.lineStyle(2, 0xffd88a, Math.max(0, Math.min(1, b.life * 2)));
+      tr.beginPath();
+      tr.moveTo(b.x, b.y);
+      tr.lineTo(b.x - nx * l, b.y - ny * l);
+      tr.strokePath();
+    }
+    this.tracers = this.tracers.filter((b) => b.life > 0);
+
+    const hf = this.hitFx;
+    hf.clear();
+    for (const f of this.fx) {
+      f.t += dt;
+      const a = Math.max(0, 1 - f.t / 0.3);
+      hf.fillStyle(f.color, a * 0.5);
+      const r = (f.big ? 4 + f.t * 500 : 3 + f.t * 130);
+      hf.fillCircle(f.x, f.y, Math.min(f.big ? 160 : 13, r));
+      if (f.big) {
+        hf.lineStyle(3, f.color, a);
+        hf.strokeCircle(f.x, f.y, Math.min(160, r));
+      }
+    }
+    this.fx = this.fx.filter((f) => f.t < (f.big ? 0.35 : 0.3));
+
+    // pets: every survivor's bought pet orbits them (bits are server-computed)
+    for (const w of this.players.values()) {
+      if (w.data.petId > 0 && !w.pet) {
+        w.pet = this.add.image(w.sprite.x, w.sprite.y, 'zombie')
+          .setScale(0.42).setTint(0x9be15d).setDepth(68).setAlpha(0.95);
+        this.worldLayer.add(w.pet);
+      } else if (w.data.petId === 0 && w.pet) {
+        w.pet.destroy(); w.pet = null;
+      }
+      if (w.pet) {
+        const a = time / 260;
+        w.pet.x = w.sprite.x + Math.cos(a) * 30;
+        w.pet.y = w.sprite.y + Math.sin(a) * 30 - 6;
+      }
     }
 
     // expire meteor warnings whose impact already happened
@@ -656,12 +860,21 @@ export class GameScene extends Phaser.Scene {
     const hungerFrac = Math.max(0, hunger / 100);
     bar.fillStyle(0x101010, 0.9).fillRect(14, 64, 216, 8);
     bar.fillStyle(hungerFrac < 0.2 ? 0xd83b2e : 0xe8a83c, 1).fillRect(14, 64, 216 * hungerFrac, 8);
-    this.hud.inv.setText(hungerFrac <= 0
+    const items = me ? `  ·  💣${me.bombs}  ⚡${me.haste}` : '';
+    this.hud.inv.setText((hungerFrac <= 0
       ? `🍖 0 · STARVING! Eat! [F]`
-      : `🍖 ×${me ? me.food : 0}  💊 ×${me ? me.med : 0}  ·  [F] eat  [G] heal  [SPACE] swing`);
+      : `🍖 ×${me ? me.food : 0}  💊 ×${me ? me.med : 0}${items}`)
+      + '   ·   B shop');
 
+    const gun = me ? gunOf(me.gunId) : GUNS[0];
+    const ammo = me ? me.ammo : 0;
     this.hud.statusRight.setText(
-      `${this.biome.name} · ⚔${me ? me.kills : 0} · ${this.players.size} survivors · ${world.clock}s survived`);
+      `${this.biome.name} · 💰${me ? me.coin : 0} · ${gun.name} ${ammo}/${gun.mag}`
+      + `${ammo === 0 ? ' ⟳' : ''} · ⚔${me ? me.kills : 0} · ${world.clock}s`);
+    if (this.shopOpen) {
+      const shopCoin = document.getElementById('shop-coin');
+      if (shopCoin && me) shopCoin.textContent = `💰 ${me.coin}`;
+    }
   }
 }
 
@@ -680,6 +893,114 @@ function lerpGroup(map, dt, factor) {
     w.sprite.y += (w.data.y - w.sprite.y) * t;
     if (w.shadow) { w.shadow.x = w.sprite.x; w.shadow.y = w.sprite.y + 10; }
     if (w.tag) w.tag.setPosition(w.sprite.x, w.sprite.y - 12);
+  }
+}
+
+// ---------------------------------------------------------------- shop DOM ---
+
+let shopTab = 'guns';
+
+function shopCard(list, opts) {
+  const el = document.createElement('div');
+  el.className = 'sit';
+  const h = document.createElement('h3'); h.textContent = opts.title; el.appendChild(h);
+  const sub = document.createElement('small'); sub.textContent = opts.sub; el.appendChild(sub);
+  const p = document.createElement('p'); p.textContent = opts.body; el.appendChild(p);
+  if (opts.action) {
+    const b = document.createElement('button');
+    b.textContent = opts.action.label;
+    b.disabled = !!opts.action.disabled;
+    if (opts.action.cls) b.classList.add(opts.action.cls);
+    if (opts.action.onClick && !opts.action.disabled) b.addEventListener('click', opts.action.onClick);
+    el.appendChild(b);
+  }
+  list.appendChild(el);
+}
+
+function renderShop(scene) {
+  const list = document.getElementById('shop-list');
+  if (!list) return;
+  const me = scene.conn?.room?.state?.players?.get(scene.localSid);
+  if (!me) return;
+  const coin = me.coin | 0;
+  const coinEl = document.getElementById('shop-coin');
+  if (coinEl) coinEl.textContent = `💰 ${coin}`;
+  list.innerHTML = '';
+
+  const send = (payload) => { scene.conn?.send('buy', payload); };
+
+  if (shopTab === 'guns') {
+    GUNS.forEach((g) => {
+      const owned = !!me.own.get(String(g.id));
+      const equipped = me.gunId === g.id;
+      shopCard(list, {
+        title: g.name,
+        sub: `💰 ${g.price}`,
+        body: `DMG ${Math.round(g.dmg)} · ${(1 / g.cd).toFixed(1)}/s · MAG ${g.mag} · PEL ${g.pel}`,
+        action: equipped
+          ? { label: 'IN USE', disabled: true, cls: 'eq' }
+          : owned
+            ? { label: 'EQUIP', onClick: () => scene.conn?.send('equip', { gun: g.id }) }
+            : { label: `BUY — ${g.price}💰`, disabled: coin < g.price, onClick: () => send({ kind: 'gun', id: g.id }) },
+      });
+    });
+  } else if (shopTab === 'up') {
+    SHOP.up.forEach((u) => {
+      const lvl = me.up.get(u.key) || 0;
+      const cost = Math.round(u.base * (1 + lvl * 1.1));
+      const maxed = lvl >= SHOP.upgradeCap;
+      shopCard(list, {
+        title: u.name,
+        sub: maxed ? `Lv ${lvl}/${SHOP.upgradeCap} — MAX` : `Lv ${lvl}/${SHOP.upgradeCap} · 💰 ${cost}`,
+        body: u.desc,
+        action: maxed
+          ? { label: 'MAXED', disabled: true, cls: 'eq' }
+          : { label: `UPGRADE — ${cost}💰`, disabled: coin < cost, onClick: () => send({ kind: 'up', key: u.key }) },
+      });
+    });
+  } else {
+    shopCard(list, {
+      title: '💣 Bomb',
+      sub: `carried ${me.bombs}/${SHOP.bombs.cap} · 💰 ${SHOP.bombs.base}`,
+      body: `[Z] blasts zombies around you for ${SHOP.bombs.dmg} damage`,
+      action: { label: `BUY — ${SHOP.bombs.base}💰`, disabled: coin < SHOP.bombs.base || me.bombs >= SHOP.bombs.cap, onClick: () => send({ kind: 'item', item: 'bomb' }) },
+    });
+    shopCard(list, {
+      title: '⚡ Rush',
+      sub: `carried ${me.haste}/${SHOP.haste.cap} · 💰 ${SHOP.haste.base}`,
+      body: `[V] short speed burst (+${Math.round((SHOP.haste.mul - 1) * 100)}%)`, 
+      action: { label: `BUY — ${SHOP.haste.base}💰`, disabled: coin < SHOP.haste.base || me.haste >= SHOP.haste.cap, onClick: () => send({ kind: 'item', item: 'haste' }) },
+    });
+    Object.entries(SHOP.pets).forEach(([id, pet]) => {
+      const owned = me.petId === Number(id);
+      shopCard(list, {
+        title: `🐾 ${pet.name}`,
+        sub: owned ? 'YOUR PET' : `💰 ${pet.price}`,
+        body: pet.desc + ` · ${pet.dmg} dmg/peck`,
+        action: owned
+          ? { label: 'IN PARTY', disabled: true, cls: 'eq' }
+          : { label: me.petId ? 'ONE PET ONLY' : `ADOPT — ${pet.price}💰`, disabled: !!me.petId || coin < pet.price, onClick: () => send({ kind: 'pet', id: Number(id) }) },
+      });
+    });
+  }
+}
+
+function initShopDom(scene) {
+  const tabs = document.getElementById('shop-tabs');
+  if (tabs && !tabs.dataset.wired) {
+    tabs.dataset.wired = '1';
+    tabs.addEventListener('click', (e) => {
+      const btn = e.target.closest('button[data-tab]');
+      if (!btn) return;
+      shopTab = btn.dataset.tab;
+      tabs.querySelectorAll('button').forEach((b) => b.classList.toggle('on', b === btn));
+      renderShop(scene);
+    });
+  }
+  const close = document.getElementById('shop-x');
+  if (close && !close.dataset.wired) {
+    close.dataset.wired = '1';
+    close.addEventListener('click', () => window.__gameScene?.toggleShop(false));
   }
 }
 

@@ -27,8 +27,16 @@ biomes online with other people:
 - **Loot**: walk onto supply crates scattered across the endless world to scavenge
   rations 🍖 and medkits 💊. Downed zombies drop some of their supplies too.
   Scavenged crates stay scavenged for everyone (late joiners get the true list).
-- **Combat**: [Space] or left-click swings a melee arc toward your aim; the server
-  arbitrates reach, arc, cooldown, knockback and every drop.
+- **Combat**: hold left-click shoots the equipped gun toward your mouse; [Space]
+  swings a melee arc. The server arbitrates reach, cooldown, ammo, reloads, bullets,
+  crits, knockback and every drop. [1]–[5] / mouse wheel switch guns.
+- **Shop & coins** (ported from Đêm Xác Sống): zombies pay coins for every kill.
+  Press [B] any time to buy 20 guns in 5 classes, 11 multi-level upgrades
+  (damage, fire rate, mag, reload, speed, max HP, armor, regen, crit, coin magnet,
+  pet training), bombs [Z] and rush charges [V]. The server validates every price.
+- **Pets**: adopt a bat, wolf or owl — it orbits you and bites nearby zombies.
+- **Difficulty**: Easy / Normal / Brutal / Doom picks on the biome screen scale
+  zombie HP, speed, damage, wave pacing and coin rewards for the room.
 - **[F] eat** a ration (restores hunger + a little health), **[G] heal** with a medkit.
 - The map is **endless**: walk forever; each chunk regenerates deterministically
   from its (map, x, y) so the world is identical for every player. A pocket
@@ -56,7 +64,9 @@ npm run smoke   # headless joins all six biomes, moves, checks state sync,
 ## Controls
 
 - WASD / arrows — move (server-authoritative: the client sends input intents, never positions)
-- [Space] / left-click — melee swing toward your aim direction
+- Hold left-click — shoot toward the mouse (R reload · 1–5 / wheel switch guns)
+- [Space] — melee swing · [B] shop · [Z] bomb · [V] rush
+- [F] eat a ration · [G] use a medkit
 - Enter — chat, esc to stop
 - Walk onto a supply crate — loot it (rations / medkits)
 - F — eat a ration · G — use a medkit

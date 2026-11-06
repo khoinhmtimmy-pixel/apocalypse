@@ -5,11 +5,12 @@
 import { Room } from 'colyseus';
 import { Player, Zombie, Fire, Drop, SurvivalState } from './state.js';
 import {
-  BIOMES, TILE_SIZE, CHUNK_TILES, SPAWNS,
+  BIOMES, TILE_SIZE, CHUNK_TILES, SPAWNS, DIFFS,
   genChunkData, tileOf, isBlockedAt, isWallAt, heightAt,
 } from '../shared/maps.js';
+import { GUNS, gunOf, SHOP } from '../shared/guns.js';
 
-const PLAYER_SPEED = 118;   // px/s
+const PLAYER_SPEED = 118;   // px/s baseline (up.spd + haste multiply)
 const HP_MAX = 100;
 const HUNGER_MAX = 100;
 const HUNGER_DRAIN = 0.38;      // hunger/s — a full belly lasts ~4.5 min
@@ -36,6 +37,14 @@ const DROP_FOOD_CHANCE = 0.45;
 const ZOMBIE_LEASH_PX = 940;    // farther than this from every survivor...
 const ZOMBIE_LEASH_MS = 6000;   // ...for this long, and the zombie fades out
 
+// Đêm Xác Sống port: kill payouts and combat helpers (difficulty-scaled)
+const KILL_COIN = 3;            // base coins per kill (× diff.coin)
+const KILL_SCORE = 12;
+const BULLET_RADIUS = 17;       // zombie hit radius vs bullets
+const PET_RADIUS = 300;         // pet supports from this distance
+const PET_CD_MS = 1300;
+const REGEN_PER_S = 0.6;        // per up.reg level, after 6s without damage
+
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 
 export class SurvivalRoom extends Room {
@@ -45,6 +54,7 @@ export class SurvivalRoom extends Room {
     this.mapId = BIOMES[options.mapId] ? options.mapId : 'zombie_city';
     this.biome = BIOMES[this.mapId];
     this.rules = this.biome.rules;
+    this.diff = DIFFS[clamp(Number(options?.diff) | 0, 0, DIFFS.length - 1)] || DIFFS[1];
 
     this.state = new SurvivalState();
     this.state.mapId = this.mapId;
@@ -65,6 +75,12 @@ export class SurvivalRoom extends Room {
     this.zombieFarSince = new Map();  // zombieId -> ms since out of everyone's reach
     this.dropsSeq = 0;
     this.waterCapAnnounced = false;
+    this.bullets = [];                // server-only projectiles {x,y,vx,vy,life,pid,gun,n}
+    this.lastShot = new Map();        // sessionId -> ms of last shot
+    this.reloadBy = new Map();        // sessionId -> ms when reload finishes
+    this.lastHurtAt = new Map();      // sessionId -> ms of last damage taken (regen)
+    this.hasteBy = new Map();         // sessionId -> ms when haste expires
+    this.petCd = new Map();           // sessionId -> ms of last pet bite
     this.meteorTimer = this.rules.meteorIntervalMs
       ? this.rules.meteorIntervalMs / 2 : 0;
     this.zombieSeq = 0;
@@ -90,6 +106,22 @@ export class SurvivalRoom extends Room {
     return { px: 24 * TILE_SIZE, py: 24 * TILE_SIZE };
   }
 
+  // derived stats from the selected difficulty + shop upgrades
+  upOf(player, key) {
+    return player?.up?.get(String(key)) || 0;
+  }
+
+  hpMaxOf(player) {
+    return HP_MAX + this.upOf(player, 'hp') * 20;
+  }
+
+  moveSpeedOf(player, sessionId) {
+    let spd = PLAYER_SPEED * (1 + 0.07 * this.upOf(player, 'spd'));
+    const now = Date.now();
+    if (now < (this.hasteBy.get(sessionId) || 0)) spd *= SHOP.haste.mul;
+    return spd;
+  }
+
   onJoin(client, options) {
     const name = String(options?.name || 'survivor').trim().slice(0, 12) || 'survivor';
     const spot = this.findSpawnSpot();
@@ -97,6 +129,8 @@ export class SurvivalRoom extends Room {
     const player = new Player({ name, hp: HP_MAX, hunger: HUNGER_MAX });
     player.x = Math.round(spot.px);
     player.y = Math.round(spot.py);
+    player.own.set(String(SHOP.startGun), 1);
+    player.ammo = gunOf(0).mag;
     this.state.players.set(client.sessionId, player);
     this.sessionByPlayer.set(player, client.sessionId);
 
@@ -126,10 +160,145 @@ export class SurvivalRoom extends Room {
     this.lastZombieHit.delete(client.sessionId);
     this.lastLootPickup.delete(client.sessionId);
     this.lastAttack.delete(client.sessionId);
+    this.lastShot.delete(client.sessionId);
+    this.reloadBy.delete(client.sessionId);
+    this.lastHurtAt.delete(client.sessionId);
+    this.hasteBy.delete(client.sessionId);
+    this.petCd.delete(client.sessionId);
   }
 
   // ------------------------------------------------------------ messages  ---
   messages = {
+    // equip another owned gun (hotkeys 1-5 / mouse wheel client-side)
+    'equip': (client, data) => {
+      const player = this.state.players.get(client.sessionId);
+      if (!player) return;
+      const id = Number(data?.gun) | 0;
+      if (!player.own.get(String(id))) return;
+      player.gunId = id;
+      player.ammo = gunOf(id).mag;
+      this.reloadBy.delete(client.sessionId);
+    },
+
+    // [Space]/left-click fires the equipped gun — server checks cd, ammo, auth
+    'shoot': (client, data) => {
+      const sessionId = client.sessionId;
+      const player = this.state.players.get(sessionId);
+      if (!player) return;
+      const now = Date.now();
+      const gun = gunOf(player.gunId);
+      const cdMs = gun.cd * 1000 * (1 - 0.06 * this.upOf(player, 'rate'));
+      if (now - (this.lastShot.get(sessionId) || 0) < cdMs) return;
+      if (this.reloadBy.has(sessionId)) return;
+      if (player.ammo <= 0) { this.startReload(sessionId, player, gun); return; }
+
+      this.lastShot.set(sessionId, now);
+      player.ammo = Math.max(0, player.ammo - 1);
+
+      let aim = Number(data?.angle);
+      if (!Number.isFinite(aim)) aim = (player.angle / 255) * Math.PI * 2;
+      for (let i = 0; i < gun.pel; i++) {
+        // per-pellet fan (shotguns) plus a touch of per-bullet jitter
+        const a = aim + (i - (gun.pel - 1) / 2) * Math.max(gun.spr, 0.09)
+          + (Math.random() - 0.5) * gun.spr * 0.5;
+        this.bullets.push({
+          x: player.x, y: player.y,
+          vx: Math.cos(a) * gun.v, vy: Math.sin(a) * gun.v,
+          life: gun.life, pid: sessionId, gun: player.gunId,
+          dmg: gun.dmg * (1 + 0.15 * this.upOf(player, 'dmg')),
+        });
+      }
+      if (player.ammo <= 0) this.startReload(sessionId, player, gun);
+      this.broadcast('shot', {
+        sid: sessionId, x: player.x, y: player.y, angle: aim,
+        gun: player.gunId, n: gun.pel, spr: gun.spr, v: gun.v, life: gun.life,
+      });
+    },
+
+    // force a magazine change
+    'reload': (client) => {
+      const player = this.state.players.get(client.sessionId);
+      if (!player || this.reloadBy.has(client.sessionId)) return;
+      this.startReload(client.sessionId, player, gunOf(player.gunId));
+    },
+
+    // the Đêm Xác Sống shop — coins are earned by surviving, spent mid-run
+    'buy': (client, data) => {
+      const sessionId = client.sessionId;
+      const player = this.state.players.get(sessionId);
+      if (!player) return;
+      const kind = String(data?.kind || '');
+      let ok = false, text = '';
+      if (kind === 'gun' || kind === 'equip') {
+        const gun = gunOf(Number(data?.id) | 0);
+        if (kind === 'equip') {
+          if (player.own.get(String(gun.id)) && gun.id !== player.gunId) {
+            this.messages.equip(client, data); ok = true; text = `Equipped ${gun.name}`;
+          }
+        } else if (!player.own.get(String(gun.id)) && player.coin >= gun.price) {
+          player.coin -= gun.price;
+          player.own.set(String(gun.id), 1);
+          player.gunId = gun.id;
+          player.ammo = gun.mag;
+          this.reloadBy.delete(sessionId);
+          ok = true; text = `Bought ${gun.name} · equipped`;
+        }
+      } else if (kind === 'up') {
+        const def = SHOP.up.find((u) => u.key === data?.key);
+        const lvl = player.up.get(String(def?.key || '')) || 0;
+        if (def && lvl < SHOP.upgradeCap) {
+          const cost = Math.round(def.base * (1 + lvl * 1.1));
+          if (player.coin >= cost) {
+            player.coin -= cost;
+            player.up.set(def.key, lvl + 1);
+            if (def.key === 'hp') this.healPlayer(sessionId, 20 * (lvl + 1));
+            ok = true; text = `${def.name} → level ${lvl + 1}`;
+          }
+        }
+      } else if (kind === 'item') {
+        if (data?.item === 'bomb' && player.bombs < SHOP.bombs.cap
+          && player.coin >= SHOP.bombs.base) {
+          player.coin -= SHOP.bombs.base; player.bombs++; ok = true; text = 'Bought bomb [Z]';
+        } else if (data?.item === 'haste' && player.haste < SHOP.haste.cap
+          && player.coin >= SHOP.haste.base) {
+          player.coin -= SHOP.haste.base; player.haste++; ok = true; text = 'Bought rush [V]';
+        }
+      } else if (kind === 'pet') {
+        const pet = SHOP.pets[Number(data?.id) | 0];
+        if (pet && player.petId === 0 && player.coin >= pet.price) {
+          player.coin -= pet.price;
+          player.petId = Number(data.id);
+          ok = true; text = `${pet.name} joins the party`;
+        }
+      }
+      if (!ok) text = text || 'Not enough coins';
+      client.send('system', { event: ok ? 'bought' : 'buyfail', text });
+    },
+
+    // [Z] bomb — validated by the server (charge + money spent earlier)
+    'bomb': (client) => {
+      const player = this.state.players.get(client.sessionId);
+      if (!player || player.bombs <= 0) return;
+      player.bombs--;
+      const r = SHOP.bombs.radius;
+      let hits = 0;
+      for (const [zid, zombie] of this.state.zombies) {
+        if (Math.hypot(zombie.x - player.x, zombie.y - player.y) < r) { hits++; this.killZombie(zid, zombie, player, 'bomb'); }
+      }
+      this.broadcast('system', { event: 'bomb', x: player.x, y: player.y, hits });
+    },
+
+    // [V] rush — short speed boost charge
+    'haste': (client) => {
+      const sessionId = client.sessionId;
+      const player = this.state.players.get(sessionId);
+      if (!player || player.haste <= 0) return;
+      const now = Date.now();
+      if (now < (this.hasteBy.get(sessionId) || 0)) return;
+      player.haste--;
+      this.hasteBy.set(sessionId, now + SHOP.haste.ms);
+      this.broadcast('system', { event: 'haste', name: player.name });
+    },
     'input': (client, data) => {
       const input = this.inputs.get(client.sessionId);
       if (!input) return;
@@ -231,8 +400,9 @@ export class SurvivalRoom extends Room {
     // --- zombie waves (zombie biomes) ---
     if (this.biome.zombies) {
       this.waveTimer += deltaMs;
-      if (this.waveTimer >= rules.waveInterval) {
-        this.waveTimer -= rules.waveInterval;
+      const waveEvery = (rules.waveInterval || 12000) * this.diff.waves;
+      if (this.waveTimer >= waveEvery) {
+        this.waveTimer -= waveEvery;
         this.state.world.wave++;
         const players = this.state.players.size;
         const budget = Math.min(rules.maxZombies - this.state.zombies.size,
@@ -268,10 +438,21 @@ export class SurvivalRoom extends Room {
       this.addFire(m.x, m.y);
     }
 
-    // --- players: movement, hazards, hunger, loot ---
+    // finish magazine changes
+    for (const [sid, at] of this.reloadBy) {
+      if (wall < at) continue;
+      this.reloadBy.delete(sid);
+      const player = this.state.players.get(sid);
+      if (player) player.ammo = gunOf(player.gunId).mag;
+    }
+
+    // fly server-only bullets and settle their hits
+    this.processBullets(dt);
+
+    // --- players: movement, hazards, hunger, loot, pets ---
     for (const [sessionId, player] of this.state.players) {
       const input = this.inputs.get(sessionId) || { dx: 0, dy: 0 };
-      this.moveCharacter(player, input.dx, input.dy, PLAYER_SPEED, dt);
+      this.moveCharacter(player, input.dx, input.dy, this.moveSpeedOf(player, sessionId), dt);
       if (input.dx || input.dy) {
         player.angle = clamp(Math.round(((Math.atan2(input.dy, input.dx) / TAU) * 255) % 256), 0, 255);
       }
@@ -319,6 +500,33 @@ export class SurvivalRoom extends Room {
 
       if (dps > 0) this.damagePlayer(sessionId, dps * dt);
 
+      // passive regen after a quiet stretch (shop upgrade)
+      const regen = this.upOf(player, 'reg');
+      const hpMax = this.hpMaxOf(player);
+      if (regen > 0 && wall - (this.lastHurtAt.get(sessionId) || 0) > 6000
+        && (this.hpFloat.get(sessionId) ?? 0) < hpMax) {
+        const hp = Math.min(hpMax, (this.hpFloat.get(sessionId) ?? player.hp) + regen * REGEN_PER_S * dt);
+        this.hpFloat.set(sessionId, hp);
+        player.hp = Math.round(hp);
+      }
+
+      // pet AI: circle the owner, gnaw the nearest zombie (server-computed)
+      const pet = SHOP.pets[player.petId];
+      if (pet && wall - (this.petCd.get(sessionId) || 0) > PET_CD_MS) {
+        let target = null, targetD = 1e9;
+        for (const [zid, zombie] of this.state.zombies) {
+          const d = Math.hypot(zombie.x - player.x, zombie.y - player.y);
+          if (d < targetD && d < PET_RADIUS) { targetD = d; target = { zid, zombie }; }
+        }
+        if (target) {
+          this.petCd.set(sessionId, wall);
+          const petDmg = Math.round(pet.dmg * (1 + 0.12 * this.upOf(player, 'ptr')));
+          target.zombie.hp = Math.max(0, target.zombie.hp - petDmg);
+          this.broadcast('system', { event: 'pet', sid: sessionId, x: target.zombie.x, y: target.zombie.y });
+          if (target.zombie.hp <= 0) this.killZombie(target.zid, target.zombie, player, 'pet');
+        }
+      }
+
       this.ensureChunkFires(player);
 
       // scavenge: automatic pickup when walking onto a supply crate
@@ -350,12 +558,12 @@ export class SurvivalRoom extends Room {
       }
 
       if (bestD > rules.zombieContact) {
-        const speed = Math.min(rules.zombieSpeed + this.state.world.wave * 3.5, 120);
+        const speed = Math.min(rules.zombieSpeed + this.state.world.wave * 3.5, 120) * this.diff.spd;
         const nx = (best.x - zombie.x) / bestD, ny = (best.y - zombie.y) / bestD;
         this.zombieMove(zombie, nx * speed * dt, ny * speed * dt);
       } else if (wall - (this.lastZombieHit.get(bestSid) || 0) > rules.zombieAttackMs) {
         this.lastZombieHit.set(bestSid, wall);
-        this.damagePlayer(bestSid, rules.zombieDamage);
+        this.damagePlayer(bestSid, rules.zombieDamage * this.diff.dmg);
         // small knockback separated from the player
         const nx = zombie.x - best.x, ny = zombie.y - best.y;
         const nd = Math.max(1, Math.hypot(nx, ny));
@@ -431,10 +639,21 @@ export class SurvivalRoom extends Room {
     const ang = Math.atan2(zombie.y - player.y, zombie.x - player.x);
     this.zombieMove(zombie, Math.cos(ang) * ATTACK_KNOCKBACK, Math.sin(ang) * ATTACK_KNOCKBACK);
     if (hp > 0) return;
+    this.killZombie(zid, zombie, player, 'melee');
+  }
 
+  // one unified payout path for every cause: melee, bullet, pet, bomb
+  killZombie(zid, zombie, player, cause) {
     this.state.zombies.delete(zid);
     this.zombieFarSince.delete(zid);
     player.kills = Math.min(255, player.kills + 1);
+
+    // Đêm Xác Sống economy: coins + score per kill, scaled by difficulty
+    const gold = this.upOf(player, 'gold') * 0.12;
+    const coin = Math.max(1, Math.round(KILL_COIN * this.diff.coin * (1 + gold)));
+    player.coin = Math.min(65535, player.coin + coin);
+    player.score += Math.max(1, Math.round(KILL_SCORE * this.diff.coin));
+
     const roll = Math.random();
     const kind = roll < DROP_MED_CHANCE ? 'med' : roll < DROP_MED_CHANCE + DROP_FOOD_CHANCE ? 'food' : null;
     if (kind) {
@@ -447,8 +666,42 @@ export class SurvivalRoom extends Room {
       this.state.drops.set(id, drop);
     }
     this.broadcast('system', {
-      event: 'kill', name: player.name, drop: kind || '',
+      event: 'kill', name: player.name, drop: kind || '', cause, coin,
+      x: zombie.x, y: zombie.y,
     });
+  }
+
+  // server-only projectile flight: bullets never sync, only damage does
+  processBullets(dt) {
+    for (let i = this.bullets.length - 1; i >= 0; i--) {
+      const b = this.bullets[i];
+      b.x += b.vx * dt; b.y += b.vy * dt; b.life -= dt;
+      let dead = b.life <= 0;
+      if (!dead) {
+        for (const [zid, zombie] of this.state.zombies) {
+          if (Math.hypot(zombie.x - b.x, zombie.y - b.y) > BULLET_RADIUS) continue;
+          const shooter = this.state.players.get(b.pid);
+          let dmg = b.dmg;
+          if (shooter && Math.random() < 0.06 * this.upOf(shooter, 'crit')) {
+            dmg *= 2; // crit shot (shop upgrade)
+            this.pushFx('crit', b.x, b.y);
+          }
+          zombie.hp = Math.max(0, zombie.hp - Math.round(dmg));
+          dead = true; // each bullet hits one zombie at most
+          if (zombie.hp <= 0 && shooter) this.killZombie(zid, zombie, shooter, 'gun');
+          break;
+        }
+      }
+      if (dead) this.bullets.splice(i, 1);
+    }
+    if (this.bullets.length > 240) this.bullets.splice(0, this.bullets.length - 240);
+  }
+
+  startReload(sessionId, player, gun) {
+    if (this.reloadBy.has(sessionId) || player.ammo >= gun.mag) return;
+    const rl = gun.rl * (1 - 0.08 * this.upOf(player, 'rl'));
+    this.reloadBy.set(sessionId, Date.now() + Math.round(rl * 1000));
+    this.broadcast('system', { event: 'reload', sid: sessionId });
   }
 
   // ------------------------------------------------------------------ fire ---
@@ -512,15 +765,18 @@ export class SurvivalRoom extends Room {
     if (amount <= 0) return;
     const player = this.state.players.get(sessionId);
     if (!player) return;
+    amount *= 1 - 0.07 * this.upOf(player, 'arm'); // shop armor plate
     const hp = Math.max(0, (this.hpFloat.get(sessionId) ?? player.hp) - amount);
     this.hpFloat.set(sessionId, hp);
+    this.lastHurtAt.set(sessionId, Date.now());
     if (hp > 0.5) {
-      player.hp = Math.min(HP_MAX, Math.round(hp));
+      player.hp = Math.min(this.hpMaxOf(player), Math.round(hp));
       return;
     }
     // died — respawn, restore the body (but keep the backpack)
-    this.hpFloat.set(sessionId, HP_MAX);
-    player.hp = HP_MAX;
+    const hpMax = this.hpMaxOf(player);
+    this.hpFloat.set(sessionId, hpMax);
+    player.hp = Math.min(255, hpMax);
     this.hungerFloat.set(sessionId, HUNGER_MAX);
     player.hunger = HUNGER_MAX;
     player.deaths = Math.min(255, player.deaths + 1);
@@ -534,9 +790,14 @@ export class SurvivalRoom extends Room {
   healPlayer(sessionId, amount) {
     const player = this.state.players.get(sessionId);
     if (!player) return;
-    const hp = Math.min(HP_MAX, (this.hpFloat.get(sessionId) ?? player.hp) + amount);
+    const cap = this.hpMaxOf(player);
+    const hp = Math.min(cap, (this.hpFloat.get(sessionId) ?? player.hp) + amount);
     this.hpFloat.set(sessionId, hp);
     player.hp = Math.round(hp);
+  }
+
+  pushFx(kind, x, y) {
+    this.broadcast('system', { event: 'fx', kind, x: Math.round(x), y: Math.round(y) });
   }
 
   // ------------------------------------------------------------- zombies ----
@@ -575,7 +836,8 @@ export class SurvivalRoom extends Room {
     }
 
     const id = 'z' + (++this.zombieSeq);
-    const zombie = new Zombie({ hp: 26 + Math.round(this.state.world.wave * 1.6) });
+    const hp = Math.round((26 + this.state.world.wave * 1.6) * this.diff.hp);
+    const zombie = new Zombie({ hp: Math.min(255, hp) });
     zombie.x = Math.round(px);
     zombie.y = Math.round(py);
     this.state.zombies.set(id, zombie);
