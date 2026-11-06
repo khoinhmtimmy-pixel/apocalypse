@@ -22,6 +22,48 @@ const SHOOT_THROTTLE_MS = 70; // client-side rate cap (the server is strict too)
 
 // ------------------------------------------------------------ biome select ---
 
+// Soft menu backdrop: vertical gradient, a warm horizon glow and a faint grid.
+// Drawn with real fills rather than a flat colour so the canvas never looks
+// like a black rectangle floating in the page.
+function drawMenuBackdrop(scene, W, H) {
+  const g = scene.add.graphics().setDepth(-10);
+  const top = Phaser.Display.Color.ValueToColor(0x0a0d13);
+  const bottom = Phaser.Display.Color.ValueToColor(0x1b2029);
+  const bands = 48;
+  for (let i = 0; i < bands; i++) {
+    const c = Phaser.Display.Color.Interpolate.ColorWithColor(top, bottom, bands - 1, i);
+    g.fillStyle(Phaser.Display.Color.GetColor(c.r, c.g, c.b), 1);
+    g.fillRect(0, (H / bands) * i, W, H / bands + 1);
+  }
+  g.fillStyle(0x8a2b1e, 0.12).fillEllipse(W / 2, H + 120, W * 1.35, 340);
+  g.fillStyle(0x1d5c42, 0.10).fillEllipse(W / 2, H + 190, W * 1.05, 300);
+  g.lineStyle(1, 0xffffff, 0.03);
+  for (let x = 0; x <= W; x += 40) g.lineBetween(x, 0, x, H);
+  for (let y = 0; y <= H; y += 40) g.lineBetween(0, y, W, y);
+}
+
+// Rounded-ish toggle button used for the online/solo switch and for continue.
+function pillButton(scene, x, y, w, h, text, on, onClick) {
+  const box = scene.add.rectangle(x, y, w, h, on ? 0x1d3527 : 0x161a21)
+    .setStrokeStyle(2, on ? 0x5fbf6a : 0x2f3742)
+    .setInteractive({ useHandCursor: true });
+  const label = scene.add.text(x, y, text, {
+    fontFamily: 'monospace', fontSize: '12px', color: on ? '#9be15d' : '#9aa4b0',
+  }).setOrigin(0.5);
+  box.on('pointerover', () => { if (!box.isOn) box.setFillStyle(0x1d2330); });
+  box.on('pointerout', () => { if (!box.isOn) box.setFillStyle(0x161a21); });
+  box.on('pointerdown', onClick);
+  box.isOn = on;
+  return {
+    set(state) {
+      box.isOn = state;
+      box.setFillStyle(state ? 0x1d3527 : 0x161a21)
+        .setStrokeStyle(2, state ? 0x5fbf6a : 0x2f3742);
+      label.setColor(state ? '#9be15d' : '#9aa4b0');
+    },
+  };
+}
+
 export class BiomeSelectScene extends Phaser.Scene {
   constructor() { super('biome_select'); }
 
@@ -39,96 +81,108 @@ export class BiomeSelectScene extends Phaser.Scene {
       this.scene.start('game', { mapId: preset, diff: this.diff, solo: this.soloMode });
       return;
     }
-    const W = this.scale.width;
-    this.cameras.main.setBackgroundColor('#17181c');
+    const W = this.scale.width, H = this.scale.height;
+    this.cameras.main.setBackgroundColor('#0b0d12');
+    drawMenuBackdrop(this, W, H);
 
-    this.add.text(W / 2, 56, '☠ DOOMDAYS ☠', {
-      fontFamily: 'monospace', fontSize: '38px', color: '#c0392b',
-    }).setOrigin(0.5);
-    this.add.text(W / 2, 94, 'a limitless world. survive the endtimes. together. or not.', {
-      fontFamily: 'monospace', fontSize: '13px', color: '#777',
+    this.add.text(W / 2, 46, 'DOOMDAYS', {
+      fontFamily: 'monospace', fontSize: '40px', color: '#e0553f',
+      stroke: '#240b07', strokeThickness: 6,
+    }).setOrigin(0.5).setShadow(0, 4, '#000000', 10, true, true);
+    this.add.text(W / 2, 78, 'a limitless world · survive the endtimes · alone or together', {
+      fontFamily: 'monospace', fontSize: '12px', color: '#8b95a2',
     }).setOrigin(0.5);
 
-    // two-column grid of biome cards
+    // -------------------------------------------------- online / solo choice ---
+    const hint = this.add.text(W / 2, 156, '', {
+      fontFamily: 'monospace', fontSize: '11px', color: '#7d8794',
+    }).setOrigin(0.5);
+    const setMode = (solo) => {
+      this.soloMode = solo;
+      onlineBtn.set(!solo);
+      soloBtn.set(solo);
+      hint.setText(solo
+        ? 'solo — the whole simulation runs in this tab, no server, saves locally'
+        : 'online — joins the shared server, other survivors drop into your world');
+    };
+    const onlineBtn = pillButton(this, W / 2 - 122, 128, 214, 32, 'PLAY ONLINE', !this.soloMode, () => setMode(false));
+    const soloBtn = pillButton(this, W / 2 + 122, 128, 214, 32, 'PLAY SOLO · offline', this.soloMode, () => setMode(true));
+    hint.setText(this.soloMode
+      ? 'solo — the whole simulation runs in this tab, no server, saves locally'
+      : 'online — joins the shared server, other survivors drop into your world');
+
+    // ------------------------------------------------------------ difficulty ---
+    this.add.text(30, 176, 'DIFFICULTY', {
+      fontFamily: 'monospace', fontSize: '11px', color: '#6f7883',
+    });
+    this.diffBtns = [];
+    DIFFS.forEach((d, i) => {
+      const on = this.diff === i;
+      const b = this.add.rectangle(100 + i * 112, 196, 104, 28, on ? 0x9be15d : 0x161a21)
+        .setStrokeStyle(2, on ? 0x9be15d : 0x2f3742).setInteractive({ useHandCursor: true });
+      const label = this.add.text(b.x, b.y, d.name, {
+        fontFamily: 'monospace', fontSize: '12px', color: on ? '#0b1411' : '#a9b2bd',
+      }).setOrigin(0.5);
+      b.on('pointerdown', () => {
+        this.diff = i;
+        this.diffBtns.forEach((btn, j) => {
+          btn.btn.setFillStyle(j === i ? 0x9be15d : 0x161a21)
+            .setStrokeStyle(2, j === i ? 0x9be15d : 0x2f3742);
+          btn.label.setColor(j === i ? '#0b1411' : '#a9b2bd');
+        });
+      });
+      this.diffBtns.push({ btn: b, label });
+    });
+
+    // ------------------------------------------- resume the last offline run ---
+    const run = loadRun();
+    if (run) {
+      pillButton(this, W - 168, 196, 274, 28,
+        `CONTINUE · ${run.player.kills} kills · ${run.player.coin} coins`, false, () => {
+          showChat();
+          this.scene.start('game', { mapId: run.mapId, diff: run.diff, solo: true, save: run });
+        });
+    }
+
+    // --------------------------------------------------------------- biomes ---
     const list = Object.values(BIOMES);
-    const cardW = (W - 90) / 2, cardH = 118, gap = 14;
-    const x0 = 30, y0 = 124;
+    const cardW = (W - 90) / 2, cardH = 104, gap = 12;
+    const x0 = 30, y0 = Math.max(214, Math.round(H / 2 - 168));
     list.forEach((biome, i) => {
       const col = i % 2, row = Math.floor(i / 2);
-      const x = x0 + col * (cardW + gap), y = y0 + row * (cardH + 12);
-      const box = this.add.rectangle(x + cardW / 2, y + cardH / 2, cardW, cardH, 0x26292f)
-        .setStrokeStyle(2, 0x44484f).setInteractive({ useHandCursor: true });
-      this.add.text(x + 14, y + 10, biome.name, {
-        fontFamily: 'monospace', fontSize: '16px', color: '#e8e4d8',
+      const x = x0 + col * (cardW + gap), y = y0 + row * (cardH + 10);
+      const accent = biome.palette.fire ?? 0x5fbf6a;
+      const box = this.add.rectangle(x + cardW / 2, y + cardH / 2, cardW, cardH, 0x181c23)
+        .setStrokeStyle(1, 0x2b323c).setInteractive({ useHandCursor: true });
+      this.add.rectangle(x + 3, y + 5, 4, cardH - 10, accent).setOrigin(0, 0).setAlpha(0.9);
+      this.add.text(x + 16, y + 12, biome.name, {
+        fontFamily: 'monospace', fontSize: '16px', color: '#eceae2',
       });
-      this.add.text(x + 14, y + 32, biome.desc, {
-        fontFamily: 'monospace', fontSize: '10px', color: '#8a8f96',
-        wordWrap: { width: cardW - 40 },
+      this.add.text(x + 16, y + 36, biome.desc, {
+        fontFamily: 'monospace', fontSize: '10px', color: '#8b95a2',
+        wordWrap: { width: cardW - 36 }, lineSpacing: 2,
       });
-      this.add.text(x + cardW - 14, y + cardH - 12, 'ENTER', {
-        fontFamily: 'monospace', fontSize: '12px', color: '#5ecfff',
-      }).setOrigin(1, 1);
-      box.on('pointerover', () => box.setFillStyle(0x33373d));
-      box.on('pointerout', () => box.setFillStyle(0x26292f));
+      const go = this.add.text(x + cardW - 14, y + cardH - 12, 'ENTER ▸', {
+        fontFamily: 'monospace', fontSize: '11px', color: '#5ecfff',
+      }).setOrigin(1, 1).setAlpha(0.7);
+      box.on('pointerover', () => {
+        box.setFillStyle(0x20262f).setStrokeStyle(1, accent);
+        go.setAlpha(1);
+      });
+      box.on('pointerout', () => {
+        box.setFillStyle(0x181c23).setStrokeStyle(1, 0x2b323c);
+        go.setAlpha(0.7);
+      });
       box.on('pointerdown', () => {
         showChat();
         this.scene.start('game', { mapId: biome.id, diff: this.diff ?? 1, solo: !!this.soloMode });
       });
     });
 
-    // difficulty row (Đêm Xác Sống port): applies when you create the room
-    this.add.text(W - 20, 528 - 12, 'DIFFICULTY — applies when you create a room', {
-      fontFamily: 'monospace', fontSize: '11px', color: '#777',
-    }).setOrigin(1, 0);
-    this.diffBtns = [];
-    DIFFS.forEach((d, i) => {
-      const b = this.add.rectangle(W - 460 + i * 118, 536, 108, 30,
-        this.diff === i ? 0x9be15d : 0x26292f)
-        .setStrokeStyle(2, 0x44484f).setInteractive({ useHandCursor: true });
-      const label = this.add.text(b.x, b.y, `${d.name}`,
-        { fontFamily: 'monospace', fontSize: '13px', color: this.diff === i ? '#0b1411' : '#b9c2bb' })
-        .setOrigin(0.5);
-      b.on('pointerdown', () => {
-        this.diff = i;
-        this.diffBtns.forEach((btn, j) => {
-          btn.btn.setFillStyle(j === i ? 0x9be15d : 0x26292f);
-          btn.label.setColor(j === i ? '#0b1411' : '#b9c2bb');
-        });
-      });
-      this.diffBtns.push({ btn: b, label });
-    });
-
-    // offline mode: the same simulation running in this tab, no server
-    const soloBox = this.add.rectangle(150, 546, 250, 28, this.soloMode ? 0x2f5d33 : 0x26292f)
-      .setStrokeStyle(2, this.soloMode ? 0x9be15d : 0x44484f).setInteractive({ useHandCursor: true });
-    const soloLabel = this.add.text(150, 546, this.soloMode ? 'SOLO MODE: ON' : 'PLAY SOLO (offline)', {
-      fontFamily: 'monospace', fontSize: '12px', color: this.soloMode ? '#d8f5d0' : '#b9c2bb',
-    }).setOrigin(0.5);
-    soloBox.on('pointerdown', () => {
-      this.soloMode = !this.soloMode;
-      soloBox.setFillStyle(this.soloMode ? 0x2f5d33 : 0x26292f)
-        .setStrokeStyle(2, this.soloMode ? 0x9be15d : 0x44484f);
-      soloLabel.setText(this.soloMode ? 'SOLO MODE: ON' : 'PLAY SOLO (offline)')
-        .setColor(this.soloMode ? '#d8f5d0' : '#b9c2bb');
-    });
-
-    // resume an offline run — online economy is still per-room
-    const run = loadRun();
-    if (run) {
-      const resume = this.add.rectangle(430, 546, 260, 28, 0x2b3550)
-        .setStrokeStyle(2, 0x4a6ea8).setInteractive({ useHandCursor: true });
-      this.add.text(430, 546, `CONTINUE · ${run.player.kills} kills · ${run.player.coin} coins`, {
-        fontFamily: 'monospace', fontSize: '12px', color: '#cfe3ff',
+    this.add.text(W / 2, H - 26,
+      'WASD move · click shoot · SPACE melee · B shop · F eat · G heal · Z bomb · V rush', {
+        fontFamily: 'monospace', fontSize: '11px', color: '#5b636e',
       }).setOrigin(0.5);
-      resume.on('pointerdown', () => {
-        showChat();
-        this.scene.start('game', { mapId: run.mapId, diff: run.diff, solo: true, save: run });
-      });
-    }
-
-    this.add.text(W / 2, 588, 'WASD move · shoot · SPACE melee · B shop · F eat · G heal · Z bomb · V rush · solo runs offline', {
-      fontFamily: 'monospace', fontSize: '11px', color: '#555',
-    }).setOrigin(0.5);
   }
 }
 
@@ -162,7 +216,7 @@ export class GameScene extends Phaser.Scene {
     this.worldLayer = this.add.container(0, 0);
     this.hudLayer = this.add.container(0, 0).setScrollFactor(0);
     this.cameras.main.setZoom(ZOOM);
-    this.cameras.main.setBackgroundColor('#101014');
+    this.cameras.main.setBackgroundColor(this.biome.palette.sky ?? '#101014');
     this.cameras.main.ignore(this.hudLayer);
     this.uiCam = this.cameras.add();
     this.uiCam.ignore(this.worldLayer);
@@ -1137,10 +1191,14 @@ chatInput?.addEventListener('keydown', (e) => {
 window.addEventListener('DOMContentLoaded', () => {
   document.getElementById('chat-box').style.display = 'none';
   // handle for debugging and for tests driving the menu
+  // size the canvas to the browser window instead of letterboxing a fixed
+  // 960×600 panel; the menu and HUD lay themselves out from these bounds
+  const viewW = Math.min(1440, Math.max(720, Math.round(window.innerWidth)));
+  const viewH = Math.min(1000, Math.max(480, Math.round(window.innerHeight)));
   window.__game = new Phaser.Game({
     type: Phaser.AUTO,
     parent: 'game',
-    width: 960, height: 600,
+    width: viewW, height: viewH,
     backgroundColor: '#101014',
     roundPixels: true,
     scale: { mode: Phaser.Scale.FIT, autoCenter: Phaser.Scale.CENTER_BOTH },
