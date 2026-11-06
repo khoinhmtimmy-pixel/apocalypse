@@ -1,0 +1,8 @@
+
+> apocalypse@0.1.0 build
+> esbuild client/main.js --bundle --minify --outfile=public/dist/game.js
+
+
+  public\dist\game.js  1.6mb
+
+Done in 384ms

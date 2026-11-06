@@ -1,0 +1,26 @@
+
+> apocalypse@0.1.0 sim
+> node scripts/sim-test.js
+
+✅ waves spawn zombies — wave=2 zombies=5
+✅ melee kill removes the zombie
+✅ melee kill pays coins — coin 5->8
+✅ melee kill pays score — score=12
+✅ kill event is emitted
+✅ upgrade debits coins — coin=410
+✅ upgrade levels up
+✅ unaffordable gun is rejected — coin=3
+✅ buyfail event is emitted
+✅ hunger drains over time — hunger=92
+✅ zombies damage the survivor — hp=64
+✅ same seed keeps coin in sync — 20 vs 20
+✅ same seed keeps score in sync — 60 vs 60
+✅ same seed keeps kills in sync — 5 vs 5
+✅ same seed keeps positions in sync
+✅ same seed keeps the horde in sync — 4 vs 4
+✅ sim imports nothing from server/ or node:
+✅ sim uses the seeded rng, not Math.random
+✅ player exposes only synced fields — name,x,y,angle,hp,hunger,food,med,kills,deaths,coin,score,gunId,ammo,petId,bombs,haste,up,own
+✅ per-player timers live in world.meta
+
+all sim checks passed

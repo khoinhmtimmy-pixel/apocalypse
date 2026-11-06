@@ -1,0 +1,86 @@
+
+> apocalypse@0.1.0 smoke
+> node scripts/smoke.js
+
+✅ join zombie_city (roomId=FedLVeeww)
+@colyseus/sdk: onMessage() not registered for type 'looted'.
+@colyseus/sdk: onMessage() not registered for type 'chat'.
+✅   state.mapId === zombie_city
+@colyseus/sdk: onMessage() not registered for type 'chat'.
+✅   player moved after input intent — x=928
+✅   world clock running — clock=2
+✅   hunger drains over time — hunger=99
+✅   loot/inventory fields sync — food=0 med=0
+✅   horde wave spawned — zombies=3
+✅   wave counter grew — wave=2
+@colyseus/sdk: onMessage() not registered for type 'system'.
+@colyseus/sdk: onMessage() not registered for type 'system'.
+✅   melee swing connects — kills=0 hpSum 299->274
+✅   kill pays coins + score — coin=7 score=10
+@colyseus/sdk: onMessage() not registered for type 'shot'.
+✅   shooting drains the magazine — 12->11
+✅   shop rejects unaffordable purchases — coin=7 event=buyfail
+✅   upgrade map starts empty — mag lvl=0
+✅ join flooded_world (roomId=BY3eHFpoD)
+@colyseus/sdk: onMessage() not registered for type 'looted'.
+@colyseus/sdk: onMessage() not registered for type 'chat'.
+✅   state.mapId === flooded_world
+@colyseus/sdk: onMessage() not registered for type 'chat'.
+✅   player moved after input intent — x=934
+✅   world clock running — clock=2
+✅   hunger drains over time — hunger=99
+✅   loot/inventory fields sync — food=0 med=0
+✅   water rising — water=0.009999999776482582
+✅ join heat_wastes (roomId=zorShzTRA)
+@colyseus/sdk: onMessage() not registered for type 'looted'.
+@colyseus/sdk: onMessage() not registered for type 'chat'.
+✅   state.mapId === heat_wastes
+@colyseus/sdk: onMessage() not registered for type 'chat'.
+✅   player moved after input intent — x=929
+✅   world clock running — clock=1
+✅   hunger drains over time — hunger=99
+✅   loot/inventory fields sync — food=0 med=0
+✅   temperature tracked — temp=42.5
+✅ join frost_wastes (roomId=kbcNRzPFD)
+@colyseus/sdk: onMessage() not registered for type 'looted'.
+@colyseus/sdk: onMessage() not registered for type 'chat'.
+✅   state.mapId === frost_wastes
+@colyseus/sdk: onMessage() not registered for type 'chat'.
+✅   player moved after input intent — x=928
+✅   world clock running — clock=1
+✅   hunger drains over time — hunger=99
+✅   loot/inventory fields sync — food=0 med=0
+✅   cold cycle tracked — cold=-1.899999976158142
+✅ join toxic_bog (roomId=f6lgXt6Z4)
+@colyseus/sdk: onMessage() not registered for type 'looted'.
+@colyseus/sdk: onMessage() not registered for type 'chat'.
+✅   state.mapId === toxic_bog
+@colyseus/sdk: onMessage() not registered for type 'chat'.
+✅   player moved after input intent — x=927
+✅   world clock running — clock=1
+✅   hunger drains over time — hunger=99
+✅   loot/inventory fields sync — food=0 med=0
+✅   gas surge tracked — toxin=0.5899999737739563
+✅ join meteor_fall (roomId=8lMSTZUbd)
+@colyseus/sdk: onMessage() not registered for type 'looted'.
+@colyseus/sdk: onMessage() not registered for type 'chat'.
+✅   state.mapId === meteor_fall
+@colyseus/sdk: onMessage() not registered for type 'chat'.
+✅   player moved after input intent — x=932
+✅   world clock running — clock=2
+✅   hunger drains over time — hunger=99
+✅   loot/inventory fields sync — food=0 med=0
+@colyseus/sdk: onMessage() not registered for type 'looted'.
+@colyseus/sdk: onMessage() not registered for type 'chat'.
+✅ same-map players share a room — FedLVeeww vs FedLVeeww
+@colyseus/sdk: onMessage() not registered for type 'chat'.
+@colyseus/sdk: onMessage() not registered for type 'looted'.
+@colyseus/sdk: onMessage() not registered for type 'chat'.
+✅ both players in shared state — n=3
+@colyseus/sdk: onMessage() not registered for type 'looted'.
+@colyseus/sdk: onMessage() not registered for type 'chat'.
+✅ different maps are separate worlds
+
+
+@colyseus/sdk: onMessage() not registered for type 'looted'.
+@colyseus/sdk: onMessage() not registered for type 'chat'.
