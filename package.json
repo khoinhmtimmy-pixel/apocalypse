@@ -9,7 +9,8 @@
     "watch": "esbuild client/main.js --bundle --sourcemap --outfile=public/dist/game.js --watch",
     "dev": "node server/index.js",
     "start": "npm run build && node server/index.js",
-    "smoke": "node scripts/smoke.js"
+    "smoke": "node scripts/smoke.js",
+    "sim": "node scripts/sim-test.js"
   },
   "engines": {
     "node": ">=20"

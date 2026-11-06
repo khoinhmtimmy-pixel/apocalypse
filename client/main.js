@@ -11,7 +11,8 @@ import {
 } from '../shared/maps.js';
 import { GUNS, GUN_NAMES, gunOf, SHOP } from '../shared/guns.js';
 import { buildTextures, buildChunkTexture, addVignette } from './tiles.js';
-import { GameConnection } from './net.js';
+import { GameConnection, LocalConnection } from './net.js';
+import { loadRun, clearRun } from './save.js';
 
 let conn = null; // module-scoped so scene restarts can leave cleanly
 
@@ -32,9 +33,10 @@ export class BiomeSelectScene extends Phaser.Scene {
     const preset = params.get('map');
     const presetDiff = params.get('diff');
     if (presetDiff) this.diff = Math.max(0, Math.min(DIFFS.length - 1, Number(presetDiff) | 0));
+    this.soloMode = params.get('solo') === '1' || params.get('solo') === 'true';
     if (preset && BIOMES[preset]) {
       showChat();
-      this.scene.start('game', { mapId: preset, diff: this.diff });
+      this.scene.start('game', { mapId: preset, diff: this.diff, solo: this.soloMode });
       return;
     }
     const W = this.scale.width;
@@ -70,7 +72,7 @@ export class BiomeSelectScene extends Phaser.Scene {
       box.on('pointerout', () => box.setFillStyle(0x26292f));
       box.on('pointerdown', () => {
         showChat();
-        this.scene.start('game', { mapId: biome.id, diff: this.diff ?? 1 });
+        this.scene.start('game', { mapId: biome.id, diff: this.diff ?? 1, solo: !!this.soloMode });
       });
     });
 
@@ -96,7 +98,35 @@ export class BiomeSelectScene extends Phaser.Scene {
       this.diffBtns.push({ btn: b, label });
     });
 
-    this.add.text(W / 2, 588, 'WASD move · hold left-click to shoot · SPACE swings · B shop · [F] eat · [G] heal · Z bomb · V rush', {
+    // offline mode: the same simulation running in this tab, no server
+    const soloBox = this.add.rectangle(150, 546, 250, 28, this.soloMode ? 0x2f5d33 : 0x26292f)
+      .setStrokeStyle(2, this.soloMode ? 0x9be15d : 0x44484f).setInteractive({ useHandCursor: true });
+    const soloLabel = this.add.text(150, 546, this.soloMode ? 'SOLO MODE: ON' : 'PLAY SOLO (offline)', {
+      fontFamily: 'monospace', fontSize: '12px', color: this.soloMode ? '#d8f5d0' : '#b9c2bb',
+    }).setOrigin(0.5);
+    soloBox.on('pointerdown', () => {
+      this.soloMode = !this.soloMode;
+      soloBox.setFillStyle(this.soloMode ? 0x2f5d33 : 0x26292f)
+        .setStrokeStyle(2, this.soloMode ? 0x9be15d : 0x44484f);
+      soloLabel.setText(this.soloMode ? 'SOLO MODE: ON' : 'PLAY SOLO (offline)')
+        .setColor(this.soloMode ? '#d8f5d0' : '#b9c2bb');
+    });
+
+    // resume an offline run — online economy is still per-room
+    const run = loadRun();
+    if (run) {
+      const resume = this.add.rectangle(430, 546, 260, 28, 0x2b3550)
+        .setStrokeStyle(2, 0x4a6ea8).setInteractive({ useHandCursor: true });
+      this.add.text(430, 546, `CONTINUE · ${run.player.kills} kills · ${run.player.coin} coins`, {
+        fontFamily: 'monospace', fontSize: '12px', color: '#cfe3ff',
+      }).setOrigin(0.5);
+      resume.on('pointerdown', () => {
+        showChat();
+        this.scene.start('game', { mapId: run.mapId, diff: run.diff, solo: true, save: run });
+      });
+    }
+
+    this.add.text(W / 2, 588, 'WASD move · shoot · SPACE melee · B shop · F eat · G heal · Z bomb · V rush · solo runs offline', {
       fontFamily: 'monospace', fontSize: '11px', color: '#555',
     }).setOrigin(0.5);
   }
@@ -114,7 +144,12 @@ function makeNameTag(scene, name) {
 export class GameScene extends Phaser.Scene {
   constructor() { super('game'); }
 
-  init(data) { this.mapId = data.mapId || 'zombie_city'; this.diff = data.diff ?? 1; }
+  init(data) {
+    this.mapId = data.mapId || 'zombie_city';
+    this.diff = data.diff ?? 1;
+    this.solo = !!data.solo;
+    this.save = data.save || null;
+  }
 
   create() {
     window.__gameScene = this;
@@ -170,8 +205,13 @@ export class GameScene extends Phaser.Scene {
 
     // connection to the authoritative server (auto-retry: restarts, refreshes,
     // dead rooms — do not strand the player on the error screen)
-    this.conn = conn || new GameConnection();
-    conn = this.conn;
+    if (this.solo) {
+      // offline host: shared/sim.js runs in this tab, no socket involved
+      this.conn = new LocalConnection({ seed: this.save?.seed, save: this.save });
+    } else {
+      this.conn = conn || new GameConnection();
+      conn = this.conn;
+    }
     this.status = this.add.text(this.scale.width / 2, this.scale.height / 2, 'connecting…', {
       fontFamily: 'monospace', fontSize: '18px', color: '#ccc',
     }).setOrigin(0.5).setScrollFactor(0).setDepth(101);
@@ -186,7 +226,7 @@ export class GameScene extends Phaser.Scene {
 
     // dropped room (server restart, crash, network blip): quietly re-enter the
     // world as a fresh survivor instead of freezing on a dead session
-    this.conn.onLeave((code) => {
+    if (!this.solo) this.conn.onLeave((code) => {
       if (this.rejoining) return;
       pushChat({ from: '☠ doom', text: 'connection lost — finding you a new world…' });
       this.rejoining = true;
@@ -313,6 +353,12 @@ export class GameScene extends Phaser.Scene {
 
   // retry a few times with backoff before surrendering to the error screen
   async joinWithRetry(mapId, diff) {
+    if (this.solo) {
+      this.status.setText('offline · local world');
+      await this.conn.join(mapId, localStorage.getItem('doomdays.name') || 'solo', diff);
+      pushChat({ from: '☠ doom', text: 'Offline run — the wasteland runs in this tab.' });
+      return this.conn;
+    }
     const delays = [1500, 3000, 5000];
     const name = localStorage.getItem('doomdays.name') || 'survivor';
     for (let attempt = 0; ; attempt++) {
@@ -543,6 +589,10 @@ export class GameScene extends Phaser.Scene {
   // ------------------------------------------------------------- update ---
   update(time, deltaMs) {
     const dt = deltaMs / 1000;
+
+    // the offline host steps the shared simulation here; online rooms tick
+    // themselves on the server
+    this.conn?.tick?.(time);
 
     // keep the endless world painted around the camera
     this.syncChunks();
@@ -896,6 +946,21 @@ function lerpGroup(map, dt, factor) {
   }
 }
 
+// ------------------------------------------------------------ page wiring ---
+
+// the error screen offers an offline run instead of a dead end
+document.getElementById('offline-btn')?.addEventListener('click', () => {
+  const scene = window.__gameScene;
+  const mapId = scene?.mapId || 'zombie_city';
+  const diff = scene?.diff ?? 1;
+  location.href = `/?map=${encodeURIComponent(mapId)}&diff=${diff}&solo=1`;
+});
+
+// keep the offline run safe when the tab closes mid-game
+window.addEventListener('pagehide', () => {
+  window.__gameScene?.conn?.room?.saveNow?.();
+});
+
 // ---------------------------------------------------------------- shop DOM ---
 
 let shopTab = 'guns';
@@ -1062,7 +1127,8 @@ chatInput?.addEventListener('keydown', (e) => {
 
 window.addEventListener('DOMContentLoaded', () => {
   document.getElementById('chat-box').style.display = 'none';
-  new Phaser.Game({
+  // handle for debugging and for tests driving the menu
+  window.__game = new Phaser.Game({
     type: Phaser.AUTO,
     parent: 'game',
     width: 960, height: 600,

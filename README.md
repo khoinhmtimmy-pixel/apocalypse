@@ -37,6 +37,12 @@ biomes online with other people:
 - **Pets**: adopt a bat, wolf or owl — it orbits you and bites nearby zombies.
 - **Difficulty**: Easy / Normal / Brutal / Doom picks on the biome screen scale
   zombie HP, speed, damage, wave pacing and coin rewards for the room.
+- **Play alone**: flip `PLAY SOLO (offline)` on the biome screen (or open
+  `/?map=zombie_city&solo=1`). The whole simulation — zombies, guns, shop,
+  hazards, hunger — then runs inside the tab from `shared/sim.js`, the same
+  module the server runs, so no connection is needed and nothing can drift.
+  Offline runs autosave every 10s and resume from the menu; multiplayer rooms
+  still reset their economy per room.
 - **[F] eat** a ration (restores hunger + a little health), **[G] heal** with a medkit.
 - The map is **endless**: walk forever; each chunk regenerates deterministically
   from its (map, x, y) so the world is identical for every player. A pocket
