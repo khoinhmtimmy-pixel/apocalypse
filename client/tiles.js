@@ -109,8 +109,8 @@ function paintAsphalt(ctx, ax, ay, pal, r) {
   }
 }
 
-// kerbside pavement: pale slabs with dark joints
-function paintPavement(ctx, ax, ay, pal, r) {
+// kerbside pavement: pale slabs, dark joints, and a lit kerb on road edges
+function paintPavement(ctx, ax, ay, pal, r, sides = {}) {
   const base = pal.kerb ?? 0x6e737b;
   ctx.fillStyle = hexOf(base);
   ctx.fillRect(ax, ay, S, S);
@@ -124,6 +124,34 @@ function paintPavement(ctx, ax, ay, pal, r) {
   if (r() > 0.86) {
     ctx.fillStyle = 'rgba(0,0,0,0.18)';
     ctx.fillRect(ax + Math.floor(r() * 4) * P, ay + Math.floor(r() * 4) * P, P * 2, P);
+  }
+  // kerb: a pale lip where the pavement meets asphalt, shadowed on the far side
+  ctx.fillStyle = 'rgba(255,255,255,0.20)';
+  if (sides.up) ctx.fillRect(ax, ay, S, 2);
+  if (sides.left) ctx.fillRect(ax, ay, 2, S);
+  ctx.fillStyle = 'rgba(0,0,0,0.30)';
+  if (sides.down) ctx.fillRect(ax, ay + S - 3, S, 3);
+  if (sides.right) ctx.fillRect(ax + S - 3, ay, 3, S);
+}
+
+// street furniture worn into the asphalt: manholes and standing water
+function paintStreet(ctx, ax, ay, wx, wy) {
+  const h = hash((wx * 7919) ^ (wy * 104729));
+  if (h % 13 === 0) {                       // manhole cover
+    ctx.fillStyle = 'rgba(0,0,0,0.42)';
+    ctx.beginPath(); ctx.arc(ax + 16, ay + 16, 7, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = 'rgba(122,128,136,0.55)';
+    ctx.beginPath(); ctx.arc(ax + 16, ay + 16, 5, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.5)'; ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(ax + 12, ay + 16); ctx.lineTo(ax + 20, ay + 16);
+    ctx.moveTo(ax + 16, ay + 12); ctx.lineTo(ax + 16, ay + 20);
+    ctx.stroke();
+  } else if (h % 8 === 3) {                 // puddle with a pale sky glint
+    ctx.fillStyle = 'rgba(126,176,206,0.15)';
+    ctx.beginPath(); ctx.ellipse(ax + 16, ay + 18, 9, 4.5, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = 'rgba(214,240,255,0.12)';
+    ctx.beginPath(); ctx.ellipse(ax + 13, ay + 16, 4, 1.8, 0, 0, Math.PI * 2); ctx.fill();
   }
 }
 
@@ -213,33 +241,55 @@ export function buildTextures(scene, palette) {
   const pal = palette;
 
   // blocky survivor: shirt + hair head (top-down), 1px dark outline
-  const drawCharacter = (shirt, hair, skin) => (ctx, w, h) => {
-    // shadowed body
-    ctx.fillStyle = '#00000088';
-    ctx.fillRect(4, 18, 16, 10);
-    ctx.fillStyle = shirt; ctx.fillRect(5, 17, 14, 9);
-    ctx.fillStyle = shade2(shirt, -40); ctx.fillRect(5, 24, 14, 2);
-    // head with hair
-    ctx.fillStyle = hair; ctx.fillRect(6, 4, 12, 10);
-    ctx.fillStyle = skin; ctx.fillRect(6, 12, 12, 3);
-    ctx.fillStyle = '#000000aa';
-    ctx.fillRect(6, 4, 12, 1); ctx.fillRect(6, 14, 12, 1);
-    ctx.fillRect(6, 4, 1, 11); ctx.fillRect(17, 4, 1, 11);
+  // survivor: 32×36, outlined, shaded torso, legs and a lit rim so the sprite
+  // still reads as a person when the camera zooms in close
+  const drawCharacter = (shirt, hair, skin) => (ctx) => {
+    const dark = shade2(shirt, -52), light = shade2(shirt, 26);
+    // legs + boots
+    ctx.fillStyle = '#141a24'; ctx.fillRect(10, 27, 5, 8); ctx.fillRect(18, 27, 5, 8);
+    ctx.fillStyle = '#0d1119'; ctx.fillRect(9, 33, 6, 3); ctx.fillRect(18, 33, 6, 3);
+    // torso: outline, cloth, shoulder light, hem shadow, belt buckle
+    ctx.fillStyle = '#0a0d12'; ctx.fillRect(7, 15, 19, 14);
+    ctx.fillStyle = shirt;     ctx.fillRect(8, 16, 17, 12);
+    ctx.fillStyle = light;     ctx.fillRect(9, 16, 5, 12);
+    ctx.fillStyle = dark;      ctx.fillRect(8, 25, 17, 3);
+    ctx.fillStyle = '#c8ab72'; ctx.fillRect(15, 25, 3, 3);
+    // arms and hands
+    ctx.fillStyle = dark; ctx.fillRect(5, 17, 3, 10); ctx.fillRect(25, 18, 3, 9);
+    ctx.fillStyle = skin; ctx.fillRect(5, 26, 3, 3); ctx.fillRect(25, 26, 3, 3);
+    // head: hair cap with highlight, face, jaw shadow, eyes
+    ctx.fillStyle = '#0a0d12'; ctx.fillRect(10, 2, 13, 15);
+    ctx.fillStyle = hair;      ctx.fillRect(11, 3, 11, 7);
+    ctx.fillStyle = shade2(hair, 30); ctx.fillRect(11, 3, 11, 2);
+    ctx.fillStyle = skin;      ctx.fillRect(11, 10, 11, 5);
+    ctx.fillStyle = shade2(skin, -34); ctx.fillRect(11, 14, 11, 2);
+    ctx.fillStyle = '#1a1a1c'; ctx.fillRect(13, 11, 2, 2); ctx.fillRect(19, 11, 2, 2);
+    // rim light along head and shoulders
+    ctx.fillStyle = 'rgba(255,255,255,0.16)';
+    ctx.fillRect(11, 3, 11, 1); ctx.fillRect(9, 16, 15, 1);
   };
-  canvasTex(scene, 'p_local', 24, 28, drawCharacter('#2f6fb3', '#4a2c14', '#c99a68'));
-  canvasTex(scene, 'p_other', 24, 28, drawCharacter('#b38627', '#6b4a1f', '#b98a58'));
+  canvasTex(scene, 'p_local', 32, 36, drawCharacter('#2f6fb3', '#4a2c14', '#c99a68'));
+  canvasTex(scene, 'p_other', 32, 36, drawCharacter('#b38627', '#6b4a1f', '#b98a58'));
 
-  // zombie: sickly green head, torn dark shirt, shambling asymmetric shoulders
-  canvasTex(scene, 'zombie', 24, 28, (ctx) => {
-    ctx.fillStyle = '#00000088';
-    ctx.fillRect(4, 18, 15, 10);
-    ctx.fillStyle = '#3e5d1f'; ctx.fillRect(5, 17, 14, 9);
-    ctx.fillStyle = '#2c4416'; ctx.fillRect(9, 19, 3, 2); ctx.fillRect(14, 22, 2, 2);
-    ctx.fillStyle = '#6f9e3c'; ctx.fillRect(6, 4, 12, 10);
-    ctx.fillStyle = '#51762c'; ctx.fillRect(6, 4, 12, 3);
-    ctx.fillStyle = '#c8f57a'; ctx.fillRect(8, 8, 2, 2); ctx.fillRect(13, 8, 2, 2); // glowing eyes
-    ctx.fillStyle = '#000000aa'; ctx.fillRect(6, 4, 12, 1); ctx.fillRect(6, 13, 12, 1);
-    ctx.fillRect(6, 4, 1, 10); ctx.fillRect(17, 4, 1, 10);
+  // zombie: hunched, torn shirt, one arm reaching, sickly skin, glowing eyes
+  canvasTex(scene, 'zombie', 32, 36, (ctx) => {
+    ctx.fillStyle = '#141a24'; ctx.fillRect(10, 27, 5, 8); ctx.fillRect(18, 27, 5, 8);
+    ctx.fillStyle = '#0d1119'; ctx.fillRect(9, 33, 6, 3); ctx.fillRect(18, 33, 6, 3);
+    // torn shirt
+    ctx.fillStyle = '#0a0d12'; ctx.fillRect(7, 15, 19, 14);
+    ctx.fillStyle = '#3e5d1f'; ctx.fillRect(8, 16, 17, 12);
+    ctx.fillStyle = '#2c4416'; ctx.fillRect(8, 24, 17, 4); ctx.fillRect(12, 16, 3, 6);
+    ctx.fillStyle = '#8a3b2f'; ctx.fillRect(19, 20, 4, 3);
+    // arms: one hanging, one reaching forward
+    ctx.fillStyle = '#33501a'; ctx.fillRect(5, 17, 3, 9); ctx.fillRect(25, 19, 6, 3);
+    ctx.fillStyle = '#7fa64a'; ctx.fillRect(5, 25, 3, 4); ctx.fillRect(29, 18, 3, 3);
+    // head
+    ctx.fillStyle = '#0a0d12'; ctx.fillRect(10, 2, 13, 15);
+    ctx.fillStyle = '#6f9e3c'; ctx.fillRect(11, 3, 11, 12);
+    ctx.fillStyle = '#51762c'; ctx.fillRect(11, 3, 11, 4);
+    ctx.fillStyle = '#8fb84f'; ctx.fillRect(12, 16, 3, 2);
+    ctx.fillStyle = '#c8f57a'; ctx.fillRect(13, 8, 2, 2); ctx.fillRect(19, 8, 2, 2);
+    ctx.fillStyle = '#1c2a10'; ctx.fillRect(15, 12, 4, 1);
   });
 
   // chest-style supply crate
@@ -301,6 +351,22 @@ export function buildTextures(scene, palette) {
     ctx.fillStyle = '#ffffff88'; ctx.fillRect(2, 1, 2, 2);
   });
   canvasTex(scene, 'heart_empty', 12, 11, heart(null, '#2b0f0c'));
+
+  // warm pool of light the survivor carries (additive, follows the player)
+  canvasTex(scene, 'light', 256, 256, (ctx, w, h) => {
+    const g = ctx.createRadialGradient(w / 2, h / 2, 6, w / 2, h / 2, w / 2);
+    g.addColorStop(0, 'rgba(255,238,196,0.40)');
+    g.addColorStop(0.42, 'rgba(255,214,145,0.14)');
+    g.addColorStop(1, 'rgba(255,200,120,0)');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
+  });
+
+  // the world art stays blocky pixel art at any zoom: nearest-neighbour scaling
+  // on the chunky textures only, so HUD text keeps its antialiasing
+  for (const key of ['p_local', 'p_other', 'zombie', 'supply', 'campfire', 'spawnflag']) {
+    const tex = scene.textures.get(key);
+    if (tex && tex.setFilter) tex.setFilter(Phaser.Textures.FilterMode.NEAREST);
+  }
 }
 
 // Paint one endless-world chunk (32×32 tiles) into a canvas texture.
@@ -317,6 +383,8 @@ export function buildChunkTexture(scene, mapId, cx, cy) {
   const ctx = canvas.getContext('2d');
   const pal = biome.palette;
   const T = TILE_SIZE;
+  const at = (lx, ly) => (lx < 0 || ly < 0 || lx >= CHUNK_TILES || ly >= CHUNK_TILES)
+    ? TILE.GROUND : chunk.tiles[ly * CHUNK_TILES + lx];
 
   for (let ly = 0; ly < CHUNK_TILES; ly++) {
     for (let lx = 0; lx < CHUNK_TILES; lx++) {
@@ -333,16 +401,30 @@ export function buildChunkTexture(scene, mapId, cx, cy) {
       if (tile === TILE.WALL) {           // building
         if (biome.city) paintFacade(ctx, ax, ay, pal, r);
         else paintWall(ctx, ax, ay, pal);
-      } else if (tile === TILE.ROAD) {    // street, with dashed centre line
+      } else if (tile === TILE.ROAD) {    // street: crossings, lane marks, wear
         paintAsphalt(ctx, ax, ay, pal, r);
         const hRoad = my < CITY_ROAD_W, vRoad = mx < CITY_ROAD_W;
-        if (!nearCenter && hRoad !== vRoad) {  // no markings through a junction
-          ctx.fillStyle = hexOf(pal.lane ?? 0xd8b64a);
-          if (hRoad && (((wx % 4) + 4) % 4) < 2) ctx.fillRect(ax, ay + 15, S, 2);
-          if (vRoad && (((wy % 4) + 4) % 4) < 2) ctx.fillRect(ax + 15, ay, 2, S);
+        if (!nearCenter) {
+          if (hRoad && vRoad) {           // junction: painted crossing bars
+            ctx.fillStyle = 'rgba(236,240,244,0.22)';
+            for (let s = 0; s < 4; s++) {
+              ctx.fillRect(ax + 2 + s * 8, ay + 2, 5, 10);
+              ctx.fillRect(ax + 2 + s * 8, ay + 20, 5, 10);
+            }
+          } else {                        // dashed centre line
+            ctx.fillStyle = hexOf(pal.lane ?? 0xd8b64a);
+            if (hRoad && (((wx % 4) + 4) % 4) < 2) ctx.fillRect(ax, ay + 15, S, 2);
+            if (vRoad && (((wy % 4) + 4) % 4) < 2) ctx.fillRect(ax + 15, ay, 2, S);
+          }
+          paintStreet(ctx, ax, ay, wx, wy);
         }
-      } else if (tile === TILE.SIDEWALK) { // pavement ring
-        paintPavement(ctx, ax, ay, pal, r);
+      } else if (tile === TILE.SIDEWALK) { // pavement ring with kerb edges
+        paintPavement(ctx, ax, ay, pal, r, {
+          up: at(lx, ly - 1) === TILE.ROAD,
+          down: at(lx, ly + 1) === TILE.ROAD,
+          left: at(lx - 1, ly) === TILE.ROAD,
+          right: at(lx + 1, ly) === TILE.ROAD,
+        });
       } else if (nearCenter) {            // spawn plaza dirt path
         paintDirt(ctx, ax, ay, pal, r);
       } else {                            // ground + decor + canopies
@@ -353,9 +435,23 @@ export function buildChunkTexture(scene, mapId, cx, cy) {
           paintLeaves(ctx, ax, ay, pal, r);
         }
       }
+
+      // buildings throw a short shadow onto the tile below and to their right;
+      // this is what makes the facades stand up out of the street
+      if (tile !== TILE.WALL) {
+        if (at(lx, ly - 1) === TILE.WALL) {
+          ctx.fillStyle = 'rgba(0,0,0,0.30)'; ctx.fillRect(ax, ay, S, 5);
+          ctx.fillStyle = 'rgba(0,0,0,0.13)'; ctx.fillRect(ax, ay + 5, S, 6);
+        }
+        if (at(lx - 1, ly) === TILE.WALL) {
+          ctx.fillStyle = 'rgba(0,0,0,0.20)'; ctx.fillRect(ax, ay, 4, S);
+        }
+      }
     }
   }
   scene.textures.addCanvas(key, canvas);
+  const tex = scene.textures.get(key);
+  if (tex && tex.setFilter) tex.setFilter(Phaser.Textures.FilterMode.NEAREST);
   return key;
 }
 

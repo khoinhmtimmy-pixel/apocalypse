@@ -16,7 +16,7 @@ import { loadRun, clearRun } from './save.js';
 
 let conn = null; // module-scoped so scene restarts can leave cleanly
 
-const ZOOM = 1.55;            // how tightly the camera hugs the player
+const ZOOM = 2;               // how tightly the camera hugs the player
 const CHUNK_KEEP = 16;        // max chunk textures/props held at once
 const SHOOT_THROTTLE_MS = 70; // client-side rate cap (the server is strict too)
 
@@ -200,6 +200,12 @@ export class GameScene extends Phaser.Scene {
     this.fireOverlay = this.add.graphics().setDepth(57).setAlpha(0.55);
     this.meteorOverlay = this.add.graphics().setDepth(58);
     this.worldLayer.add(this.waterOverlay, this.domeOverlay, this.fireOverlay, this.meteorOverlay);
+
+    // warm pool of light the survivor carries: lifts the zoomed-in view and
+    // separates the player from the street
+    this.playerLight = this.add.image(0, 0, 'light')
+      .setDepth(68).setBlendMode(Phaser.BlendModes.ADD).setAlpha(0.5);
+    this.worldLayer.add(this.playerLight);
 
     addVignette(this, this.hudLayer);
 
@@ -678,6 +684,9 @@ export class GameScene extends Phaser.Scene {
 
     lerpGroup(this.players, dt, 12);
     lerpGroup(this.zombies, dt, 10);
+
+    const local = this.players.get(this.localSid);
+    if (local && this.playerLight) this.playerLight.setPosition(local.sprite.x, local.sprite.y);
 
     this.drawSwings(dt);
 
